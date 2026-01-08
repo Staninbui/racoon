@@ -31,3 +31,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"]}
 
 # time
 chrono = { version = "0.4", features = ["serde"]}
+
+# gcp auth
+gcp_auth = "0.12"
+
+# For getting user home directory
+dirs = "5"

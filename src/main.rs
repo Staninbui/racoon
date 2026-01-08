@@ -1,17 +1,18 @@
-//! racoon CLI entry point
+//! racoon CLI entry point.
 //!
-//! the main tasks
-//! - parse command line arguments
-//! - initialize logging
-//! - run the main loop
+//! Responsibilities:
+//! - Parse command-line arguments
+//! - Initialize logging/tracing system
+//! - Dispatch to appropriate command handlers
+//! - Handle top-level errors gracefully
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, warn, Level};
-use tracing_subscriber::filter::filter_fn;
+use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs};
+use racoon::gcp::GcpAuth;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,26 +24,21 @@ async fn main() -> Result<()> {
 
     info!("racoon staring up 🦝");
 
-    // run the main loop
-    match cli.command {
-        Commands::Tail(args) => {
-            handle_tail(args).await?;
-        }
-        Commands::Projects => {
-            handle_projects().await?;
-        }
-        Commands::Auth => {
-            handle_auth().await?;
-        }
-        Commands::Download(args) => {
-            handle_download(args).await?;
-        }
-        Commands::Query(args) => {
-            handle_query(args).await?;
-        }
+    // Dispatch to command handlers
+    let result = match cli.command {
+        Commands::Tail(args) => handle_tail(args).await,
+        Commands::Projects => handle_projects().await,
+        Commands::Auth => handle_auth().await,
+        Commands::Download(args) => handle_download(args).await,
+        Commands::Query(args) => handle_query(args).await,
+    };
+
+    // Handle errors gracefully at the top level
+    if let Err(ref e) = result {
+        error!("Command failed: {:#}", e);
     }
 
-    Ok(())
+    result
 }
 
 /// initialize tracing
@@ -80,7 +76,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
         project = %args.project,
         filter = ?args.filter,
         severity = ?args.severity,
-        since = ?args.since,
+        since = %args.since,
         "Starting log tail"
     );
 
@@ -88,13 +84,23 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
     let since_seconds = racoon::parse_duration(&args.since)
         .map_err(|e| anyhow::anyhow!("Invalid -- since value: {}", e))?;
 
-    info!("Looking back {} seconds", since_seconds);
+    let auth = GcpAuth::new()
+        .await
+        .context("Failed to initialize GCP authentication")?;
+
+    auth.verify()
+        .await
+        .context("Failed to verify GCP authentication")?;
+
+    info!("Authentication successful: {}", auth.credential_info());
 
     // TODO:
-    // 1. gcp auth
     // 2. log client
     // 3. start GUI
 
+    println!("✅ Authentication successful!");
+    println!("   {}", auth.credential_info());
+    println!();
     println!("🚧 TUI mode not yet implemented");
     println!("   Project: {}", args.project);
     println!("   Filter: {:?}", args.filter);
@@ -108,8 +114,20 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
 async fn handle_projects() -> Result<()> {
     info!("Listing accessible GCP projects");
 
+    // Initialize and verify authentication first
+    let auth = GcpAuth::new()
+        .await
+        .context("Failed to initialize GCP authentication")?;
+
+    auth.verify()
+        .await
+        .context("Failed to verify GCP authentication")?;
+
+    println!("✅ Authentication successful!");
+    println!("   {}", auth.credential_info());
+    println!();
+
     // TODO:
-    // 1. gcp auth
     // 2. call api
 
     println!("🚧 Project listing not yet implemented");
@@ -122,22 +140,45 @@ async fn handle_projects() -> Result<()> {
 async fn handle_auth() -> Result<()> {
     info!("Verifying GCP authentication");
 
-    // TODO:
-    // 1. get default credentials
-    // 2. show auth status
+    println!("Checking GCP credentials...\n");
 
-    println!("🚧 Auth verification not yet implemented");
-    println!("   Checking for:");
-    println!("   - Application Default Credentials (gcloud auth application-default login)");
-    println!("   - GOOGLE_APPLICATION_CREDENTIALS environment variable");
+    // Attempt to initialize authentication
+    match GcpAuth::new().await {
+        Ok(auth) => {
+            let cred_info = auth.credential_info();
+            println!(" Credential Source: {}", cred_info);
 
-    match std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-        Ok(path) => {
-            println!("\n✅ GOOGLE_APPLICATION_CREDENTIALS is set: {}", path);
+            // Attempt to verify by getting a token
+            match auth.verify().await {
+                Ok(()) => {
+                    println!("\n✅ Authentication successful!");
+                    println!("   Credentials are valid and can obtain access tokens.");
+
+                    if let Ok(token) = auth.token().await {
+                        let preview = if token.len() > 20 {
+                            format!("{}...", &token[..20])
+                        } else {
+                            token.clone()
+                        };
+                        println!("   Access token preview: {}", preview);
+                    }
+                }
+                Err(e) => {
+                    println!("\n❌ Authentication failed during token verification");
+                    println!("   Error: {}", e);
+                    println!("\n💡 Try running: gcloud auth application-default login");
+                    return Err(e.into());
+                }
+            }
         }
-        Err(_) => {
-            println!("\n⚠️  GOOGLE_APPLICATION_CREDENTIALS is not set");
-            println!("   Will try Application Default Credentials...");
+        Err(e) => {
+            println!("❌ No valid credentials found");
+            println!("   Error: {}", e);
+            println!();
+            println!("💡 To authenticate, run one of:");
+            println!("   1. gcloud auth application-default login");
+            println!("   2. Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json");
+            return Err(e.into());
         }
     }
 
@@ -154,9 +195,21 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
         "Downloading logs"
     );
 
+    // Initialize and verify authentication
+    let auth = GcpAuth::new()
+        .await
+        .context("Failed to initialize GCP authentication")?;
+
+    auth.verify()
+        .await
+        .context("Failed to verify GCP authentication")?;
+
+    println!("✅ Authentication successful!");
+
     // TODO:
     // 1. --ai arg exists, call AI to generate query
     // 2. query and download
+
 
     if let Some(ref ai_prompt) = args.ai {
         println!("   AI-assisted download requested");
@@ -182,8 +235,18 @@ async fn handle_query(args: QueryArgs) -> Result<()> {
         "Executing query"
     );
 
+    // Initialize and verify authentication
+    let auth = GcpAuth::new()
+        .await
+        .context("Failed to initialize GCP authentication")?;
+
+    auth.verify()
+        .await
+        .context("GCP credentials verification failed")?;
+
+    println!("✅ Authentication successful!");
+
     // TODO:
-    // 1. gcp auth
     // 2. query
     // 3. output, support --json
 

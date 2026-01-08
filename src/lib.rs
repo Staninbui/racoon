@@ -1,20 +1,43 @@
-//! racoon - GCP Log Spy with AI
+//! racoon - GCP Log Spy with AI superpowers 🦝
 //!
-//! it provides a simple interface for checking gcp logs with AI
+//! This crate provides real-time GCP log streaming, AI-powered analysis,
+//! and natural language query generation capabilities.
+//!
+//! # Modules
+//!
+//! - [`cli`]: Command-line interface definitions using clap.
+//! - [`gcp`]: Google Cloud Platform integration (auth, logging).
+//! - [`error`]: Application-level error types.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use racoon::gcp::GcpAuth;
+//!
+//! #[tokio::main]
+//! async fn main() -> anyhow::Result<()> {
+//!     // Initialize GCP authentication
+//!     let auth = GcpAuth::new().await?;
+//!     auth.verify().await?;
+//!     println!("Connected to GCP!");
+//!     Ok(())
+//! }
+//! ```
 
-use tracing_subscriber::filter::filter_fn;
 
 pub mod cli;
-
+pub mod error;
+pub mod gcp;
 /// todo:
-/// - pub mod gcp;
 /// - pub mod ai;
 /// - pub mod ui;
 /// - pub mod storage;
-///
-///
-///
-///   parse time range syntax like `1h`, `5m`, `30s`
+
+// Re-export commonly used types at crate root
+pub use error::{RacoonError, Result};
+pub use gcp::GcpAuth;
+
+/// parse time range syntax like `1h`, `5m`, `30s`
 ///
 /// # Examples
 ///
@@ -26,7 +49,13 @@ pub mod cli;
 /// assert_eq!(parse_duration("1h"), Ok(3600));
 /// assert_eq!(parse_duration("2d"), Ok(172800));
 /// ```
-pub fn parse_duration(s: &str) -> Result<u64, String> {
+///
+/// # Errors
+///
+/// Returns an error string if the input is empty, contains an invalid number,
+/// or uses an unknown unit.
+///
+pub fn parse_duration(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Duration cannot be empty".to_string())
