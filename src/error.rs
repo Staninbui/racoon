@@ -22,7 +22,7 @@ pub enum RacoonError {
 
     /// GCP logging API errors
     #[error("Logging API error: {0}")]
-    Logs(String),
+    Logs(#[from] crate::gcp::logs::LogsError),
 
     /// AI API errors
     #[error("AI error: {0}")]
@@ -38,5 +38,5 @@ pub enum RacoonError {
 }
 
 /// Result type alias for racoon operations.
-pub type Result<T>  = std::result::Result<T, RacoonError>;
+pub type Result<T> = std::result::Result<T, RacoonError>;
 

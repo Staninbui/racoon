@@ -35,7 +35,7 @@ pub mod gcp;
 
 // Re-export commonly used types at crate root
 pub use error::{RacoonError, Result};
-pub use gcp::GcpAuth;
+pub use gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
 
 /// parse time range syntax like `1h`, `5m`, `30s`
 ///
@@ -75,6 +75,14 @@ pub fn parse_duration(s: &str) -> std::result::Result<u64, String> {
     Ok(num * multiplier)
 }
 
+/// Parse a duration string (e.g., "1h", "30m") into a chrono::Duration.
+///
+/// This version returns a chrono::Duration for use with the LogFilter.
+pub fn parse_duration_chrono(s: &str) -> std::result::Result<chrono::Duration, String> {
+    let seconds = parse_duration(s)?;
+    Ok(chrono::Duration::seconds(seconds as i64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +100,11 @@ mod tests {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("100x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_chrono() {
+        let dur = parse_duration_chrono("1h").unwrap();
+        assert_eq!(dur.num_seconds(), 3600);
     }
 }

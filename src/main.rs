@@ -12,7 +12,7 @@ use tracing::{info, error, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs};
-use racoon::gcp::GcpAuth;
+use racoon::gcp::{GcpAuth, LogFilter, LogsClient};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -80,9 +80,8 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
         "Starting log tail"
     );
 
-    // parse time range
-    let since_seconds = racoon::parse_duration(&args.since)
-        .map_err(|e| anyhow::anyhow!("Invalid -- since value: {}", e))?;
+    let duration = racoon::parse_duration_chrono(&args.since)
+        .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
     let auth = GcpAuth::new()
         .await
@@ -92,20 +91,49 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
         .await
         .context("Failed to verify GCP authentication")?;
 
-    info!("Authentication successful: {}", auth.credential_info());
+    println!("✅ Connected to GCP");
 
-    // TODO:
-    // 2. log client
-    // 3. start GUI
+    let client = LogsClient::new(auth, args.project.clone());
 
-    println!("✅ Authentication successful!");
-    println!("   {}", auth.credential_info());
-    println!();
-    println!("🚧 TUI mode not yet implemented");
-    println!("   Project: {}", args.project);
-    println!("   Filter: {:?}", args.filter);
-    println!("   Severity: {:?}", args.severity);
-    println!("   Since: {} ({} seconds)", args.since, since_seconds);
+    let mut filter = LogFilter::new().since(duration);
+
+    if let Some(ref f) = args.filter {
+        filter = filter.raw(f);
+    }
+
+    if let Some(ref sev) = args.severity {
+        filter = filter.severity_min(&format!("{:?}", sev).to_uppercase());
+    }
+
+    if let Some(ref res) = args.resource {
+        filter = filter.resource_type(res);
+    }
+
+    println!("📋 Filter: {}", filter.build());
+    println!("🔄 Streaming logs (Ctrl+C to stop)...\n");
+
+    // Start streaming
+    let (mut rx, _handle) = client.stream_entries(Some(filter), duration).await?;
+
+    // Print logs as they arrive (until TUI is implemented)
+    while let Some(entry) = rx.recv().await {
+        // Color code by severity
+        let severity = entry.severity_or_default();
+        let color = match severity {
+            "ERROR" | "CRITICAL" | "ALERT" | "EMERGENCY" => "\x1b[31m", // Red
+            "WARNING" => "\x1b[33m", // Yellow
+            "INFO" => "\x1b[32m",    // Green
+            _ => "\x1b[0m",          // Default
+        };
+
+        println!(
+            "{}{} [{}]\x1b[0m {}",
+            color,
+            entry.timestamp_str(),
+            severity,
+            entry.message_preview()
+        );
+    }
 
     Ok(())
 }
@@ -206,21 +234,38 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
 
     println!("✅ Authentication successful!");
 
+    let client = LogsClient::new(auth, args.project.clone());
+
+    let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+
+    println!("📥 Downloading logs...");
+    println!("   Project: {}", args.project);
+    println!("   Limit: {}", args.limit);
+    println!("   Output: {}", args.output);
+
+    // Fetch logs
+    let entries = client.list_entries(filter.as_ref(), args.limit).await?;
+
+    println!("   Fetched {} entries", entries.len());
+
+    // Write to file
+    let file = std::fs::File::create(&args.output)
+        .context("Failed to create output file")?;
+    let writer = std::io::BufWriter::new(file);
+    serde_json::to_writer_pretty(writer, &entries)
+        .context("Failed to write JSON")?;
+
+    println!("\n✅ Downloaded {} logs to {}", entries.len(), args.output);
+
     // TODO:
     // 1. --ai arg exists, call AI to generate query
     // 2. query and download
-
 
     if let Some(ref ai_prompt) = args.ai {
         println!("   AI-assisted download requested");
         println!("   Prompt: \"{}\"", ai_prompt);
         println!("   Will generate GCP query and download matching logs");
     }
-
-    println!("🚧 Download not yet implemented");
-    println!("   Project: {}", args.project);
-    println!("   Output: {}", args.output);
-    println!("   Limit: {} logs", args.limit);
 
     Ok(())
 }
@@ -246,15 +291,38 @@ async fn handle_query(args: QueryArgs) -> Result<()> {
 
     println!("✅ Authentication successful!");
 
-    // TODO:
-    // 2. query
-    // 3. output, support --json
+    let client = LogsClient::new(auth, args.project.clone());
 
-    println!("🚧 Query not yet implemented");
-    println!("   Project: {}", args.project);
-    println!("   Filter: {:?}", args.filter);
-    println!("   Limit: {} logs", args.limit);
-    println!("   JSON output: {}", args.json);
+    // Build filter
+    let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+
+    // Fetch logs
+    let entries = client.list_entries(filter.as_ref(), args.limit).await?;
+
+    if args.json {
+        // JSON output
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        // Human-readable output
+        println!("Found {} log entries:\n", entries.len());
+
+        for entry in &entries {
+            let severity = entry.severity_or_default();
+            let color = match severity {
+                "ERROR" | "CRITICAL" => "\x1b[31m",
+                "WARNING" => "\x1b[33m",
+                _ => "",
+            };
+
+            println!(
+                "{}{} [{}]\x1b[0m {}",
+                color,
+                entry.timestamp_str(),
+                severity,
+                entry.message_preview()
+            );
+        }
+    }
 
     Ok(())
 }

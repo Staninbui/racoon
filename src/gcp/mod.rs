@@ -9,7 +9,8 @@
 //! - `logs`: Cloud Logging API access.
 
 pub mod auth;
-mod logs;
+pub mod logs;
 
-pub use auth::{AuthError, GcpAuth};
-// pub mod logs;
+// Re-export commonly used types
+pub use auth::{AuthError, CredentialInfo, CredentialSource, GcpAuth};
+pub use logs::{LogEntry, LogFilter, LogsClient, LogsError, StreamHandle};
