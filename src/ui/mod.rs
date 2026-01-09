@@ -40,7 +40,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc;
 
 use crate::gcp::{LogEntry, LogsClient};
-use crate::ai::GeminiClient;
+use crate::ai::{GeminiClient, UserIntent};
 use widgets::{render_detail_pane, render_input_bar, render_log_list, render_ai_pane};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
@@ -64,6 +64,11 @@ pub enum AiResponse {
         query: String,
         log_count: usize,
         answer: String,
+    },
+    /// Filter set by AI.
+    FilterSet {
+        filter: String,
+        message: String,
     },
     /// Error occurred.
     Error(String),
@@ -105,18 +110,38 @@ pub async fn run_app(
                             Err(e) => AiResponse::Error(e.to_string()),
                         }
                     }
-                    AiRequest::AskQuestion(question) => {
-                        if let Some(ref lc) = logs_client {
-                            match client.ask_question(&question, lc).await {
-                                Ok(qa) => AiResponse::QuestionAnswer {
-                                    query: qa.query,
-                                    log_count: qa.log_count,
-                                    answer: qa.answer,
-                                },
-                                Err(e) => AiResponse::Error(e.to_string()),
+                    AiRequest::AskQuestion(input) => {
+                        // First detect intent
+                        match client.detect_intent(&input).await {
+                            Ok(UserIntent::SetFilter { filter, description }) => {
+                                // Just return the filter to set
+                                AiResponse::FilterSet {
+                                    filter: filter.clone(),
+                                    message: format!("✅ Already set filter: {}\n\n{}", filter, description),
+                                }
                             }
-                        } else {
-                            AiResponse::Error("Logs client not available".to_string())
+                            Ok(UserIntent::Question { question }) => {
+                                // Normal Q&A flow
+                                if let Some(ref lc) = logs_client {
+                                    match client.ask_question(&question, lc).await {
+                                        Ok(qa) => AiResponse::QuestionAnswer{
+                                            query: qa.query,
+                                            log_count: qa.log_count,
+                                            answer: qa.answer,
+                                        },
+                                        Err(e) => AiResponse::Error(e.to_string()),
+                                    }
+                                } else {
+                                    AiResponse::Error("Logs client not available".to_string())
+                                }
+                            }
+                            Ok(UserIntent::GenerateQuery { query }) => {
+                                AiResponse::FilterSet {
+                                    filter: query.clone(),
+                                    message: format!("📋 Generated query: {}\n\n(already set as filter)", query),
+                                }
+                            }
+                            Err(e) => AiResponse::Error(e.to_string()),
                         }
                     }
                 };
@@ -209,6 +234,11 @@ async fn run_event_loop(
             match response {
                 AiResponse::Explanation(text) => {
                     app.set_ai_response(text);
+                }
+                AiResponse::FilterSet { filter, message } => {
+                    // Set the filter and show confirmation
+                    app.filter = Some(filter);
+                    app.set_ai_response(message);
                 }
                 AiResponse::QuestionAnswer {
                     query,

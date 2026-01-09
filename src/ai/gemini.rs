@@ -55,6 +55,17 @@ pub struct QuestionAnswer {
     pub answer: String,
 }
 
+/// Types of user intents detected from input.
+#[derive(Debug, Clone)]
+pub enum UserIntent {
+    /// User is asking a question about logs.
+    Question { question: String },
+    /// User wants to set a filter.
+    SetFilter { filter: String, description: String },
+    /// User wants to generate a query (for viewing).
+    GenerateQuery { query: String },
+}
+
 /// Client for interacting with Google's Gemini API.
 ///
 /// Provides methods for log explanation and query generation.
@@ -131,6 +142,48 @@ impl GeminiClient {
         debug!("Explaining log entry: {}", entry.insert_id.as_deref().unwrap_or("unknown"));
 
         self.generate(&prompt).await
+    }
+
+    /// Detect user intent from natural language input.
+    pub async fn detect_intent(&self, input: &str) -> Result<UserIntent, AiError> {
+        let prompt = format!(
+            r#"Analyze this user input and determine the intent:
+
+Input: "{input}"
+
+Possible intents:
+1. QUESTION - User is asking about logs (e.g., "Are there any errors?", "What happened at 14:00?")
+2. SET_FILTER - User wants to change the current filter (e.g., "设置过滤条件为INFO以上", "only show errors", "filter by severity warning")
+3. GENERATE_QUERY - User wants to see a query (e.g., "show me the query for...", "what's the query for...")
+
+Response format (JSON only, no explanation):
+{{"intent": "QUESTION" | "SET_FILTER" | "GENERATE_QUERY", "gcp_query": "<query if applicable>", "description": "<brief description>"}}
+
+Response:"#,
+            input = input
+        );
+
+        let response = self.generate(&prompt).await?;
+
+        // Parse JSON response
+        let json: serde_json::Value = serde_json::from_str(
+            response.trim().trim_start_matches("```json").trim_end_matches("```")
+        ).map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
+
+        let intent_type = json["intent"].as_str().unwrap_or("QUESTION");
+        let gcp_query = json["gcp_query"].as_str().unwrap_or("").to_string();
+        let description = json["description"].as_str().unwrap_or("").to_string();
+
+        match intent_type {
+            "SET_FILTER" => Ok(UserIntent::SetFilter {
+                filter: gcp_query,
+                description,
+            }),
+            "GENERATE_QUERY" => Ok(UserIntent::GenerateQuery { query: gcp_query }),
+            _ => Ok(UserIntent::Question {
+                question: input.to_string(),
+            }),
+        }
     }
 
     /// Generate a GCP Logging query from natural language.
@@ -578,7 +631,7 @@ fn fix_relative_timestamps(query: &str) -> String {
 
             // Now apply replacements
             for (old_value, new_value) in replacements {
-                tracing::debug!(
+                debug!(
                     old = %old_value,
                     new = %new_value,
                     "Converted relative timestamp"

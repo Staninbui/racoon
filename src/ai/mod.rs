@@ -40,4 +40,4 @@
 pub mod prompts;
 pub mod gemini;
 
-pub use gemini::{AiError, GeminiClient};
+pub use gemini::{AiError, GeminiClient, UserIntent};
