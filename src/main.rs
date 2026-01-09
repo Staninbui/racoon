@@ -13,6 +13,7 @@ use tracing_subscriber::FmtSubscriber;
 
 use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs};
 use racoon::gcp::{GcpAuth, LogFilter, LogsClient};
+use racoon::ui::{App, run_app};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -93,7 +94,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
 
     println!("✅ Connected to GCP");
 
-    let client = LogsClient::new(auth, args.project.clone());
+    let client = LogsClient::new(auth.clone(), args.project.clone());
 
     let mut filter = LogFilter::new().since(duration);
 
@@ -109,32 +110,18 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
         filter = filter.resource_type(res);
     }
 
-    println!("📋 Filter: {}", filter.build());
-    println!("🔄 Streaming logs (Ctrl+C to stop)...\n");
+    info!("Filter: {}", filter.build());
 
     // Start streaming
-    let (mut rx, _handle) = client.stream_entries(Some(filter), duration).await?;
+    let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
 
-    // Print logs as they arrive (until TUI is implemented)
-    while let Some(entry) = rx.recv().await {
-        // Color code by severity
-        let severity = entry.severity_or_default();
-        let color = match severity {
-            "ERROR" | "CRITICAL" | "ALERT" | "EMERGENCY" => "\x1b[31m", // Red
-            "WARNING" => "\x1b[33m", // Yellow
-            "INFO" => "\x1b[32m",    // Green
-            _ => "\x1b[0m",          // Default
-        };
+    // Create app state
+    let app = App::new(args.project.clone());
 
-        println!(
-            "{}{} [{}]\x1b[0m {}",
-            color,
-            entry.timestamp_str(),
-            severity,
-            entry.message_preview()
-        );
-    }
+    // Run TUI
+    run_app(app, rx).await?;
 
+    info!("TUI exited");
     Ok(())
 }
 
