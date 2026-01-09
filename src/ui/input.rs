@@ -44,6 +44,26 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Scroll detail pane with Ctrl+j/k
+        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_detail_down();
+            Action::None
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_detail_up();
+            Action::None
+        }
+
+        // Scroll AI pane with Ctrl+n/p (next/prev)
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_ai_down();
+            Action::None
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.scroll_ai_up();
+            Action::None
+        }
+
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => {
             app.select_next();

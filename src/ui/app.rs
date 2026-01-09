@@ -52,6 +52,12 @@ pub struct App {
 
     /// Error message to display (if any).
     pub error_message: Option<String>,
+
+    /// Scroll offset for the detail pane.
+    pub detail_scroll: u16,
+
+    /// Scroll offset for the AI pane.
+    pub ai_scroll: u16,
 }
 
 impl App {
@@ -76,6 +82,8 @@ impl App {
             is_streaming: true,
             should_quit: false,
             error_message: None,
+            detail_scroll: 0,
+            ai_scroll: 0,
         }
     }
 
@@ -93,6 +101,35 @@ impl App {
                 self.selected_index = self.selected_index.saturating_sub(1);
             }
         }
+    }
+
+    /// Scroll detail pane down.
+    pub fn scroll_detail_down(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_add(1);
+    }
+
+    /// Scroll detail pane up.
+    pub fn scroll_detail_up(&mut self) {
+        self.detail_scroll = self.detail_scroll.saturating_sub(1);
+    }
+
+    /// Scroll AI pane down.
+    pub fn scroll_ai_down(&mut self) {
+        self.ai_scroll = self.ai_scroll.saturating_add(1);
+    }
+
+    /// Scroll AI pane up.
+    pub fn scroll_ai_up(&mut self) {
+        self.ai_scroll = self.ai_scroll.saturating_sub(1);
+    }
+
+    /// Reset scroll when content changes.
+    pub fn reset_detail_scroll(&mut self) {
+        self.detail_scroll = 0;
+    }
+
+    pub fn reset_ai_scroll(&mut self) {
+        self.ai_scroll = 0;
     }
 
     /// Move selection to the next log entry.
@@ -131,12 +168,14 @@ impl App {
         self.ai_response = None;
         self.ai_loading = false;
         self.ai_query = None;
+        self.ai_scroll = 0; // reset scroll
     }
 
     /// Set the AI response for the current selection.
     pub fn set_ai_response(&mut self, response: String) {
         self.ai_response = Some(response);
         self.ai_loading = false;
+        self.ai_scroll = 0; // reset scroll
     }
 
     /// Start AI loading state.
