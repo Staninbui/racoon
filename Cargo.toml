@@ -37,3 +37,9 @@ gcp_auth = "0.12"
 
 # For getting user home directory
 dirs = "5"
+
+# reading config
+toml = "0.8"
+
+# regex
+regex = "1"

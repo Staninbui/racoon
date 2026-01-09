@@ -82,6 +82,7 @@ pub enum LogsError {
 ///
 /// Provides methods to query logs, stream logs in real-time(via polling),
 /// and manage log filters.
+#[derive(Clone)]
 pub struct LogsClient {
     /// Http client for API requests.
     http: Client,
@@ -536,8 +537,8 @@ impl LogEntry {
     /// Returns the first 100 characters of the message content.
     pub fn message_preview(&self) -> String {
         let message = self.message();
-        if message.len() > 100 {
-            format!("{}...", &message[..100])
+        if message.len() > 150 {
+            format!("{}...", &message[..150])
         } else {
             message
         }

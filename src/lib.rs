@@ -29,15 +29,16 @@ pub mod cli;
 pub mod error;
 pub mod gcp;
 pub mod ui;
+pub mod ai;
 
 /// todo:
-/// - pub mod ai;
 /// - pub mod storage;
 
 // Re-exports
 pub use error::{RacoonError, Result};
 pub use gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
-pub use ui::{App, run_app};  // Add this
+pub use ui::{App, run_app};
+pub use ai::GeminiClient;
 
 /// parse time range syntax like `1h`, `5m`, `30s`
 ///

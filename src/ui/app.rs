@@ -29,11 +29,17 @@ pub struct App {
     /// Current filter string (applied to logs).
     pub filter: Option<String>,
 
+    /// Whether AI is available.
+    pub ai_available: bool,
+
     /// AI analysis result for the selected log.
     pub ai_response: Option<String>,
 
     /// Whether AI analysis is in progress.
     pub ai_loading: bool,
+
+    /// AI query that was sent to Gemini.
+    pub ai_query: Option<String>,
 
     /// GCP project ID.
     pub project: String,
@@ -62,8 +68,10 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             filter: None,
+            ai_available: false,
             ai_response: None,
             ai_loading: false,
+            ai_query: None,
             project,
             is_streaming: true,
             should_quit: false,
@@ -91,7 +99,6 @@ impl App {
     pub fn select_next(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = (self.selected_index + 1).min(self.logs.len() - 1);
-            self.clear_ai_response();
         }
     }
 
@@ -99,21 +106,18 @@ impl App {
     pub fn select_previous(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = self.selected_index.saturating_sub(1);
-            self.clear_ai_response();
         }
     }
 
     /// Move selection to the first log entry.
     pub fn select_first(&mut self) {
         self.selected_index = 0;
-        self.clear_ai_response();
     }
 
     /// Move selection to the last log entry.
     pub fn select_last(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = self.logs.len() - 1;
-            self.clear_ai_response();
         }
     }
 
@@ -126,6 +130,7 @@ impl App {
     pub fn clear_ai_response(&mut self) {
         self.ai_response = None;
         self.ai_loading = false;
+        self.ai_query = None;
     }
 
     /// Set the AI response for the current selection.

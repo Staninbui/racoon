@@ -8,23 +8,8 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ui::App;
 
-/// Render the detail pane (log JSON + AI response).
+/// Render the log detail pane (JSON view only).
 pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
-    // Split vertically: top for log detail, bottom for AI
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(60), // Log detail
-            Constraint::Percentage(40), // AI Response
-        ])
-        .split(area);
-
-    render_log_detail(frame, app, chunks[0]);
-    render_ai_pane(frame, app, chunks[1]);
-}
-
-/// Render the log detail (JSON) view.
-fn render_log_detail(frame: &mut Frame, app: &App, area: Rect) {
     let content = if let Some(entry) = app.selected_log() {
         // Pretty-print the log entry as JSON
         serde_json::to_string_pretty(entry)
@@ -47,21 +32,28 @@ fn render_log_detail(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Render the AI response pane.
-fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
+pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     let (content, style) = if app.ai_loading {
-        (
-            "⏳ Analyzing with AI...".to_string(),
-            Style::default().fg(Color::Yellow),
-        )
+        let loading_text = if let Some(ref query) = app.ai_query {
+            format!("⏳ Analyzing: \"{}\"...", query)
+        } else {
+            "⏳ Analyzing...".to_string()
+        };
+        (loading_text, Style::default().fg(Color::Yellow))
     } else if let Some(ref response) = app.ai_response {
         (response.clone(), Style::default().fg(Color::Cyan))
     } else {
-        (
-            "Press 'e' to explain selected log with AI\nPress '?' to ask a natural language question".to_string(),
-            Style::default().fg(Color::DarkGray),
-        )
+        let help = vec![
+            "Press 'e' to explain selected log",
+            "Press '?' to ask a question about your logs",
+            "",
+            "Example questions:",
+            "  • Are there any errors today?",
+            "  • 最近有发生过严重报错吗?",
+            "  • What caused the timeout at 14:00?",
+        ].join("\n");
+        (help, Style::default().fg(Color::DarkGray))
     };
-
 
     let paragraph = Paragraph::new(content)
         .style(style)

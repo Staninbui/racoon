@@ -24,9 +24,9 @@ pub enum RacoonError {
     #[error("Logging API error: {0}")]
     Logs(#[from] crate::gcp::logs::LogsError),
 
-    /// AI API errors
+    /// AI/Gemini API errors
     #[error("AI error: {0}")]
-    Ai(String),
+    Ai(#[from] crate::ai::AiError),
 
     /// Storage/IO errors
     #[error("Storage error: {0}")]

@@ -8,12 +8,13 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, error, Level};
+use tracing::{info, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs};
 use racoon::gcp::{GcpAuth, LogFilter, LogsClient};
 use racoon::ui::{App, run_app};
+use racoon::ai::GeminiClient;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -94,6 +95,18 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
 
     println!("✅ Connected to GCP");
 
+    // Try to initialize Gemini client
+    let gemini = match GeminiClient::from_env() {
+        Ok(client) => {
+            info!("AI features enabled (Gemini)");
+            Some(client)
+        }
+        Err(e) => {
+            warn!("AI features disabled: {}", e);
+            None
+        }
+    };
+
     let client = LogsClient::new(auth.clone(), args.project.clone());
 
     let mut filter = LogFilter::new().since(duration);
@@ -119,7 +132,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
     let app = App::new(args.project.clone());
 
     // Run TUI
-    run_app(app, rx).await?;
+    run_app(app, rx, gemini, Some(client)).await?;
 
     info!("TUI exited");
     Ok(())
@@ -223,37 +236,28 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
 
     let client = LogsClient::new(auth, args.project.clone());
 
-    let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+    // Check if AI-assisted download
+    let filter = if let Some(ref ai_prompt) = args.ai {
+        println!("🤖 Generating query from: \"{}\"", ai_prompt);
+
+        let gemini = GeminiClient::from_env()
+            .context("AI download requires GEMINI_API_KEY")?;
+
+        let query = gemini.generate_query(ai_prompt).await?;
+        println!("📋 Generated query: {}", query);
+
+        Some(LogFilter::new().raw(&query))
+    } else {
+        args.filter.as_ref().map(|f| LogFilter::new().raw(f))
+    };
 
     println!("📥 Downloading logs...");
-    println!("   Project: {}", args.project);
-    println!("   Limit: {}", args.limit);
-    println!("   Output: {}", args.output);
-
-    // Fetch logs
     let entries = client.list_entries(filter.as_ref(), args.limit).await?;
 
-    println!("   Fetched {} entries", entries.len());
+    let file = std::fs::File::create(&args.output)?;
+    serde_json::to_writer_pretty(std::io::BufWriter::new(file), &entries)?;
 
-    // Write to file
-    let file = std::fs::File::create(&args.output)
-        .context("Failed to create output file")?;
-    let writer = std::io::BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, &entries)
-        .context("Failed to write JSON")?;
-
-    println!("\n✅ Downloaded {} logs to {}", entries.len(), args.output);
-
-    // TODO:
-    // 1. --ai arg exists, call AI to generate query
-    // 2. query and download
-
-    if let Some(ref ai_prompt) = args.ai {
-        println!("   AI-assisted download requested");
-        println!("   Prompt: \"{}\"", ai_prompt);
-        println!("   Will generate GCP query and download matching logs");
-    }
-
+    println!("✅ Downloaded {} logs to {}", entries.len(), args.output);
     Ok(())
 }
 

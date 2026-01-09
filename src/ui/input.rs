@@ -7,151 +7,178 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, InputMode};
 
+/// Actions that may be triggered by keyboard events.
+#[derive(Debug)]
+pub enum Action {
+    /// No action needed.
+    None,
+    /// Request AI explanation for current log.
+    ExplainLog,
+    /// Request AI query generation.
+    GenerateQuery(String),
+    /// Request AI question generation.
+    AskQuestion(String),
+}
+
 /// Handle a keyboard event
 ///
 /// This function dispatches to mode-specific handlers based on the current input mode.
-pub fn handle_key_event(app: &mut App, key: KeyEvent) {
+pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
     // Clear any error message on key press
     app.clear_error();
 
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::Filter | InputMode::AiQuery | InputMode::Search => {
-            handle_input_mode(app, key);
+            handle_input_mode(app, key)
         }
     }
 }
 
 /// Handle keys in normal navigation mode.
-fn handle_normal_mode(app: &mut App, key: KeyEvent) {
+fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         // Quit
         KeyCode::Char('q') => {
             app.should_quit = true;
+            Action::None
         }
 
-        // Navigation - vim style
+        // Navigation
         KeyCode::Char('j') | KeyCode::Down => {
             app.select_next();
+            Action::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.select_previous();
+            Action::None
         }
         KeyCode::Char('g') => {
-            // gg to go to top (simplified: just 'g')
             app.select_first();
+            Action::None
         }
         KeyCode::Char('G') => {
             app.select_last();
+            Action::None
         }
         KeyCode::Home => {
             app.select_first();
+            Action::None
         }
         KeyCode::End => {
             app.select_last();
+            Action::None
         }
         KeyCode::PageDown => {
-            // Move down 10 items
-            for _ in 0..10 {
-                app.select_next();
-            }
+            for _ in 0..10 { app.select_next(); }
+            Action::None
         }
         KeyCode::PageUp => {
-            // Move up 10 items
-            for _ in 0..10 {
-                app.select_previous();
-            }
+            for _ in 0..10 { app.select_previous(); }
+            Action::None
         }
 
-        // Enter filter mode
+        // Input modes
         KeyCode::Char('/') => {
             app.enter_input_mode(InputMode::Search);
+            Action::None
         }
         KeyCode::Char('f') => {
             app.enter_input_mode(InputMode::Filter);
+            Action::None
         }
-
-        // Enter AI query mode
         KeyCode::Char('?') => {
-            app.enter_input_mode(InputMode::AiQuery);
+            if app.ai_available {
+                app.enter_input_mode(InputMode::AiQuery);
+            } else {
+                app.set_error("AI not available. Set GEMINI_API_KEY.".to_string());
+            }
+            Action::None
         }
 
         // AI explain current log
         KeyCode::Char('e') => {
-            if app.selected_log().is_some() {
-                app.start_ai_loading();
-                // Note: Actual AI call is triggered in main.rs
-                // This just sets the loading state
+            if app.ai_available && app.selected_log().is_some() {
+                Action::ExplainLog
+            } else if !app.ai_available {
+                app.set_error("AI not available. Set GEMINI_API_KEY.".to_string());
+                Action::None
+            } else {
+                Action::None
             }
         }
 
         // Toggle streaming
         KeyCode::Char('p') => {
             app.toggle_streaming();
+            Action::None
         }
 
-        // Refresh / clear error
-        KeyCode::Char('r') => {
-            app.clear_error();
-        }
-
-        // Clear AI response
+        // Clear
         KeyCode::Esc => {
             app.clear_ai_response();
+            app.filter = None;
+            Action::None
         }
 
-        _ => {}
+        _ => Action::None,
     }
 }
 
-/// Handle keys in input mode (filter, search, AI query).
-fn handle_input_mode(app: &mut App, key: KeyEvent) {
+/// Handle keys in input mode.
+fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        // Cancel input
+        // Cancel
         KeyCode::Esc => {
             app.exit_input_mode();
+            Action::None
         }
 
-        // Submit input
+        // Submit
         KeyCode::Enter => {
             let (text, mode) = app.submit_input();
 
-            if !text.is_empty() {
-                match mode {
-                    InputMode::Filter => {
-                        app.filter = Some(text);
-                    }
-                    InputMode::Search => {
-                        // TODO: Implement search within logs
-                        app.set_error("Search not yet implemented".to_string());
-                    }
-                    InputMode::AiQuery => {
-                        // Note: Actual AI call is triggered in main.rs
-                        app.start_ai_loading();
-                    }
-                    InputMode::Normal => {
-                        // Do nothing
-                    }
+            if text.is_empty() {
+                return Action::None;
+            }
+
+            match mode {
+                InputMode::Filter => {
+                    app.filter = Some(text);
+                    Action::None
                 }
+                InputMode::AiQuery => {
+                    // Return action for AI processing
+                    Action::AskQuestion(text)
+                }
+                InputMode::Search => {
+                    // TODO: Implement local search
+                    app.set_error("Search not yet implemented".to_string());
+                    Action::None
+                }
+                InputMode::Normal => Action::None,
             }
         }
 
-        // Clear all input
+        // Clear line
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_buffer.clear();
+            Action::None
         }
 
         // Text input
         KeyCode::Char(c) => {
             app.input_char(c);
+            Action::None
         }
 
         // Backspace
         KeyCode::Backspace => {
             app.input_backspace();
+            Action::None
         }
 
-        _ => {}
+        _ => Action::None,
     }
 }
 
@@ -200,6 +227,22 @@ mod tests {
 
         handle_key_event(&mut app, make_key(KeyCode::Esc));
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_explain_requires_ai() {
+        let mut app = App::new("test".to_string());
+        app.add_log(LogEntry::default());
+
+        // Without AI
+        app.ai_available = false;
+        let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
+        assert!(matches!(action, Action::None));
+
+        // With AI
+        app.ai_available = true;
+        let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
+        assert!(matches!(action, Action::ExplainLog));
     }
 
     use crate::gcp::LogEntry;
