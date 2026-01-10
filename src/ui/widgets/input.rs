@@ -39,7 +39,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             )
     } else {
         // Show keyboard hints
-        let hints_text = "j/k: Navigate │ e: AI Explain │ ?: AI Query │ f: Filter │ p: Pause │ q: Quit";
+        let hints_text = "\
+j/k: Navigate │ e: AI Explain │ ?: AI Query │ /: Search │ f: Filter │ p: Pause │ q: Quit
+g/HOME: First │ G/END: Last   │ PgDown: +10 │ PgUp: -10 │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI";
         Paragraph::new(hints_text)
             .style(Style::default().fg(Color::DarkGray))
             .block(

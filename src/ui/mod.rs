@@ -279,7 +279,7 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Constraint::Length(3),  // Header
             Constraint::Length(12), // Logs (10 rows)
             Constraint::Min(10),    // Body
-            Constraint::Length(3),  // Footer (input bar)
+            Constraint::Length(4),  // Footer (input bar)
         ])
         .split(area);
 

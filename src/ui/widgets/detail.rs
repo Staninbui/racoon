@@ -79,7 +79,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         .style(style)
         .block(
             Block::default()
-                .title(" AI Analysis ")
+                .title(" AI Analysis, Ctrl+n/p to scroll")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
         )
