@@ -235,7 +235,7 @@ impl Config {
             }
 
             // Write default config
-            let default_content = include_str!("config_template.toml");
+            let default_content = include_str!("../config_template.toml");
             std::fs::write(&path, default_content)?;
 
             debug!(path = %path.display(), "Created default config file");

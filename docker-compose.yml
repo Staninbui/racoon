@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  racoon:
+    build: .
+    image: racoon:latest
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_APPLICATION_CREDENTIALS=/credentials/key.json
+    volumes:
+      # Mount GCP credentials
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-~/.config/gcloud}:/credentials:ro
+      # Mount config
+      - ~/.config/racoon:/home/racoon/.config/racoon:ro
+      # Mount output directory for exports
+      - ./output:/home/racoon/output
+    # For TUI mode, need TTY
+    stdin_open: true
+    tty: true
