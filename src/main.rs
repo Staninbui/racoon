@@ -18,6 +18,7 @@ use racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
 use racoon::ui::{App, run_app};
 use racoon::ai::GeminiClient;
 use racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
+use racoon::ui::theme::Theme;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -91,6 +92,9 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
             "Project required. Use --project or set in config file."
         ))?;
 
+    // Apply theme
+    let theme = Theme::from_str(&config.ui.theme);
+
     // Use config default for since
     let since_str = args.since.as_deref()
         .unwrap_or(&config.defaults.since);
@@ -142,7 +146,8 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
 
     // Create app state
-    let app = App::new(project.clone());
+    let app = App::new(project.clone())
+        .with_theme(theme);
 
     // Run TUI
     run_app(app, rx, gemini, Some(client)).await?;

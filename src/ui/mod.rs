@@ -27,6 +27,7 @@
 pub mod app;
 pub mod input;
 pub mod widgets;
+pub mod theme;
 
 pub use app::{App, InputMode};
 
@@ -42,6 +43,7 @@ use tokio::sync::mpsc;
 use crate::gcp::{LogEntry, LogsClient};
 use crate::ai::{GeminiClient, UserIntent};
 use widgets::{render_detail_pane, render_input_bar, render_log_list, render_ai_pane};
+use crate::ui::theme::Theme;
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -310,29 +312,35 @@ fn render_ui(frame: &mut Frame, app: &App) {
 
 /// Render the header bar.
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
     let project = &app.project;
     let log_count = app.logs.len();
-    let (status_text, status_style) = if app.is_streaming {
-        ("● LIVE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    let theme_indicator = match app.theme {
+        Theme::Dark => "🌙",
+        Theme::Light => "☀️",
+    };
+    let status = if app.is_streaming { "● LIVE" } else { "○ PAUSED" };
+    let status_style = if app.is_streaming {
+        Style::default().fg(colors.status_live).add_modifier(Modifier::BOLD)
     } else {
-        ("○ PAUSED", Style::default().fg(Color::Yellow))
+        Style::default().fg(colors.status_paused)
     };
 
-    let ai_indicator = if app.ai_available {
-        Span::styled(" AI ", Style::default().fg(Color::Cyan))
-    } else {
-        Span::styled(" (no AI) ", Style::default().fg(Color::DarkGray))
-    };
+    let header_text = format!(
+        " 🦝 racoon │ {} │ {} logs │ {} │ ",
+        project,
+        log_count,
+        theme_indicator,
+    );
 
     let header = Paragraph::new(Line::from(vec![
-        Span::raw(format!(" 🦝 racoon │ {} │ {} logs │ ", project, log_count)),
-        Span::styled(status_text, status_style),
-        ai_indicator,
+        Span::styled(header_text, colors.header_style()),
+        Span::styled(status, status_style),
     ]))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(colors.border_focused_style())
         );
 
     frame.render_widget(header, area);

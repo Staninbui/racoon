@@ -4,6 +4,7 @@
 //! the log buffer, selection state, and input handling.
 
 use crate::gcp::LogEntry;
+use super::theme::{Theme, ThemeColors};
 
 /// Maximum number of logs to keep in memory.
 const MAX_LOGS: usize = 100;
@@ -67,6 +68,9 @@ pub struct App {
 
     /// Current match index (for next/prev navigation).
     pub search_match_index: usize,
+
+    /// Current theme.
+    pub theme: Theme,
 }
 
 impl App {
@@ -96,6 +100,7 @@ impl App {
             search_query: None,
             search_matches: Vec::new(),
             search_match_index: 0,
+            theme: Theme::Dark,
         }
     }
 
@@ -324,6 +329,25 @@ impl App {
     /// Check if a log index matches the current search.
     pub fn is_search_match(&self, index: usize) -> bool {
         self.search_matches.contains(&index)
+    }
+
+    /// Create with specified theme.
+    pub fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = theme;
+        self
+    }
+
+    /// Get current theme colors.
+    pub fn colors(&self) -> ThemeColors {
+        self.theme.colors()
+    }
+
+    /// Toggle between dark and light theme.
+    pub fn toggle_theme(&mut self) {
+        self.theme = match self.theme {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
+        };
     }
 }
 

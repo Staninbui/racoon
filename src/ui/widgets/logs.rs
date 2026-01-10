@@ -10,6 +10,7 @@ use crate::ui::App;
 /// Render the log list widget.
 pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     let logs = &app.logs;
+    let colors = app.colors();
 
     // Convert logs to list items with coloring
     let items: Vec<ListItem> = logs
@@ -24,24 +25,17 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             let line = format!("{} [{}] {}", timestamp, severity, message);
 
             // Color based on severity
-            let mut style = severity_style(severity);
+            let mut style = colors.severity_style(severity);
 
             // Highlight search matches with a different background
             if app.is_search_match(i) {
-                style = style.bg(Color::DarkGray);
+                style = style.bg(colors.search_match_bg);
             }
 
             // Highlight selected item
             if i == app.selected_index {
-                style = style.add_modifier(Modifier::REVERSED);
+                style = colors.selection_style();
             }
-
-            // Highlight selected item differently
-            let style = if i == app.selected_index {
-                style.add_modifier(Modifier::REVERSED)
-            } else {
-                style
-            };
 
             ListItem::new(line).style(style)
         })
@@ -69,9 +63,9 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Blue))
+                .border_style(colors.border_focused_style())
         )
-        .highlight_style(Style::default().add_modifier(Modifier::BOLD));
+        .highlight_style(colors.selection_style());
 
     // Create list state with selection and scroll offset
     let mut state = ListState::default();
@@ -79,31 +73,4 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     *state.offset_mut() = offset;  // Keep selection centered
 
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// Get the style for a severity level.
-fn severity_style(severity: &str) -> Style {
-    match severity {
-        "EMERGENCY" | "ALERT" | "CRITICAL" => {
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-        }
-        "ERROR" => Style::default().fg(Color::Red),
-        "WARNING" => Style::default().fg(Color::Yellow),
-        "NOTICE" => Style::default().fg(Color::Cyan),
-        "INFO" => Style::default().fg(Color::Green),
-        "DEBUG" => Style::default().fg(Color::Gray),
-        _ => Style::default(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_severity_style_colors() {
-        assert_eq!(severity_style("ERROR").fg, Some(Color::Red));
-        assert_eq!(severity_style("WARNING").fg, Some(Color::Yellow));
-        assert_eq!(severity_style("INFO").fg, Some(Color::Green));
-    }
 }

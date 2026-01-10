@@ -148,6 +148,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Toggle theme
+        KeyCode::Char('t') => {
+            app.toggle_theme();
+            Action::None
+        }
+
         // Clear
         KeyCode::Esc => {
             app.clear_search();

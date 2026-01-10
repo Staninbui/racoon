@@ -19,14 +19,15 @@ pub fn render_input_bar(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render keyboard hints in normal mode.
 fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
     let hints = if let Some(ref error) = app.error_message {
         // Show error in red
         Paragraph::new(format!("❌ {}", error))
-            .style(Style::default().fg(Color::Red))
+            .style(colors.error_style())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red))
+                    .border_style(colors.error_style())
             )
     } else if let Some(ref filter) = app.filter {
         // Show current filter
@@ -40,14 +41,14 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         // Show keyboard hints
         let hints_text = "\
-j/k: Navigate │ e: AI Explain │ ?: AI Query │ /: Search │ f: Filter │ p: Pause │ q: Quit
+j/k: Navigate │ e: AI Explain │ ?: AI Query │ /: Search │ f: Filter │ p: Pause    │t: Theme   │ q: Quit
 g/HOME: First │ G/END: Last   │ PgDown: +10 │ PgUp: -10 │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI";
         Paragraph::new(hints_text)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(colors.dim_style())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray))
+                    .border_style(colors.border_style())
             )
     };
 

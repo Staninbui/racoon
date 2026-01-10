@@ -11,6 +11,7 @@ use crate::ui::App;
 
 /// Render the log detail pane (JSON view only).
 pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
     let content = if let Some(entry) = app.selected_log() {
         // Pretty-print the log entry as JSON
         serde_json::to_string_pretty(entry)
@@ -22,11 +23,12 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
     let line_count = content.lines().count() as u16;
 
     let paragraph = Paragraph::new(content)
+        .style(Style::default().fg(colors.fg))
         .block(
             Block::default()
                 .title(" Detail (Ctrl+j/k to scroll) ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta))
+                .border_style(colors.border_focused_style())
         )
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
@@ -53,15 +55,16 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
 
 /// Render the AI response pane.
 pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
     let (content, style) = if app.ai_loading {
         let loading_text = if let Some(ref query) = app.ai_query {
             format!("⏳ Analyzing: \"{}\"...", query)
         } else {
             "⏳ Analyzing...".to_string()
         };
-        (loading_text, Style::default().fg(Color::Yellow))
+        (loading_text, Style::default().fg(colors.ai_loading))
     } else if let Some(ref response) = app.ai_response {
-        (response.clone(), Style::default().fg(Color::Cyan))
+        (response.clone(), colors.ai_style())
     } else {
         let help = vec![
             "Press 'e' to explain selected log",
@@ -72,7 +75,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             "  • 最近有发生过严重报错吗?",
             "  • What caused the timeout at 14:00?",
         ].join("\n");
-        (help, Style::default().fg(Color::DarkGray))
+        (help, colors.dim_style())
     };
 
     let paragraph = Paragraph::new(content)
@@ -81,7 +84,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(" AI Analysis, Ctrl+n/p to scroll")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(Style::default().fg(colors.ai_border))
         )
         .wrap(Wrap { trim: true })
         .scroll((app.ai_scroll, 0));
