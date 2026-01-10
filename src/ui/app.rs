@@ -108,6 +108,9 @@ impl App {
     ///
     /// Maintains the MAX_LOGS limit by removing oldest entries.
     pub fn add_log(&mut self, entry: LogEntry) {
+        // Check if user is at or near the bottom before adding
+        let was_at_bottom = self.is_at_bottom();
+
         self.logs.push(entry);
 
         // Remove oldest if we exceed the limit
@@ -118,6 +121,20 @@ impl App {
                 self.selected_index = self.selected_index.saturating_sub(1);
             }
         }
+
+        // Auto-follow: if user was at bottom, stay at bottom
+        if was_at_bottom && self.is_streaming {
+            self.selected_index = self.logs.len().saturating_sub(1);
+        }
+    }
+
+    /// Check if the selected index is at or near the bottom.
+    pub fn is_at_bottom(&self) -> bool {
+        if self.logs.is_empty() {
+            return true;
+        }
+        // Consider "at bottom" if within last 2 items
+        self.selected_index >= self.logs.len().saturating_sub(2)
     }
 
     /// Scroll detail pane down.
