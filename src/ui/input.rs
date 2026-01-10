@@ -29,9 +29,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
 
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
-        InputMode::Filter | InputMode::AiQuery | InputMode::Search => {
-            handle_input_mode(app, key)
-        }
+        InputMode::Filter | InputMode::AiQuery | InputMode::Search => handle_input_mode(app, key),
     }
 }
 
@@ -104,11 +102,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::PageDown => {
-            for _ in 0..10 { app.select_next(); }
+            for _ in 0..10 {
+                app.select_next();
+            }
             Action::None
         }
         KeyCode::PageUp => {
-            for _ in 0..10 { app.select_previous(); }
+            for _ in 0..10 {
+                app.select_previous();
+            }
             Action::None
         }
 
@@ -246,12 +248,15 @@ mod tests {
     #[test]
     fn test_navigation_keys() {
         let mut app = App::new("test".to_string());
+        app.is_streaming = false; // Disable auto-follow for testing
 
         // Add some logs
         for _ in 0..10 {
             app.add_log(LogEntry::default());
         }
 
+        // After adding logs with streaming off, selected_index should be 0
+        // Move to index 1 first
         handle_key_event(&mut app, make_key(KeyCode::Char('j')));
         assert_eq!(app.selected_index, 1);
 

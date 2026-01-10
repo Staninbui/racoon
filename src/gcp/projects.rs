@@ -101,7 +101,8 @@ impl ProjectsClient {
                 url = format!("{}?pageToken={}", url, token);
             }
 
-            let response = self.http
+            let response = self
+                .http
                 .get(&url)
                 .header("Authorization", format!("Bearer {}", token))
                 .send()
@@ -147,7 +148,8 @@ impl ProjectsClient {
             project_id
         );
 
-        let response = self.http
+        let response = self
+            .http
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .send()

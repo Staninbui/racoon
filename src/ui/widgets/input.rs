@@ -6,8 +6,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use crate::ui::app::InputMode;
 use crate::ui::App;
+use crate::ui::app::InputMode;
 
 /// Render the input bar at the bottom of the screen.
 pub fn render_input_bar(frame: &mut Frame, app: &App, area: Rect) {
@@ -27,29 +27,30 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(colors.error_style())
+                    .border_style(colors.error_style()),
             )
     } else if let Some(ref filter) = app.filter {
         // Show current filter
-        Paragraph::new(format!("Filter: {} │ Press 'f' to change, Esc to clear", filter))
-            .style(Style::default().fg(Color::Cyan))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-            )
+        Paragraph::new(format!(
+            "Filter: {} │ Press 'f' to change, Esc to clear",
+            filter
+        ))
+        .style(Style::default().fg(Color::Cyan))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
     } else {
         // Show keyboard hints
         let hints_text = "\
 j/k: Navigate │ e: AI Explain │ ?: AI Query │ /: Search │ f: Filter │ p: Pause    │t: Theme   │ q: Quit
 g/HOME: First │ G/END: Last   │ PgDown: +10 │ PgUp: -10 │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI";
-        Paragraph::new(hints_text)
-            .style(colors.dim_style())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(colors.border_style())
-            )
+        Paragraph::new(hints_text).style(colors.dim_style()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(colors.border_style()),
+        )
     };
 
     frame.render_widget(hints, area);
@@ -76,7 +77,7 @@ fn render_input_field(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
+                .border_style(Style::default().fg(border_color)),
         );
 
     frame.render_widget(paragraph, area);

@@ -18,8 +18,8 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use racoon::ai::GeminiClient;
-//! use racoon::gcp::LogEntry;
+//! use gcp_racoon::ai::GeminiClient;
+//! use gcp_racoon::gcp::LogEntry;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -37,7 +37,7 @@
 //!     Ok(())
 //! }
 //! ```
-pub mod prompts;
 pub mod gemini;
+pub mod prompts;
 
 pub use gemini::{AiError, GeminiClient, UserIntent};

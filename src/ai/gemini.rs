@@ -6,7 +6,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug};
+use tracing::debug;
 
 use super::prompts;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
@@ -22,7 +22,9 @@ const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 #[derive(Error, Debug)]
 pub enum AiError {
     /// API key not found in environment or config.
-    #[error("Gemini API key not found. Set GEMINI_API_KEY environment variable or configure in ~/.config/racoon/config.toml")]
+    #[error(
+        "Gemini API key not found. Set GEMINI_API_KEY environment variable or configure in ~/.config/racoon/config.toml"
+    )]
     NoApiKey,
 
     /// HTTP request failed.
@@ -91,7 +93,7 @@ impl GeminiClient {
     /// # Example
     ///
     /// ```rust
-    /// use racoon::ai::GeminiClient;
+    /// use gcp_racoon::ai::GeminiClient;
     ///
     /// let client = GeminiClient::new("your-api-key".to_string());
     /// ```
@@ -118,15 +120,13 @@ impl GeminiClient {
     ///
     /// Returns `AiError::NoApiKey` if no API key is found.
     pub fn from_env() -> Result<Self, AiError> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| AiError::NoApiKey)?;
+        let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| AiError::NoApiKey)?;
         Ok(Self::new(api_key))
     }
 
     /// Create client from config (checks env var first, then config file).
     pub fn from_config(config: &crate::config::Config) -> Result<Self, AiError> {
-        let api_key = config.get_api_key()
-            .ok_or(AiError::NoApiKey)?;
+        let api_key = config.get_api_key().ok_or(AiError::NoApiKey)?;
         let model = config.ai.model.clone();
         Ok(Self::with_model(api_key, model))
     }
@@ -153,12 +153,15 @@ impl GeminiClient {
     ///
     /// A human-readable explanation of the log entry.
     pub async fn explain_log(&self, entry: &LogEntry) -> Result<String, AiError> {
-        let log_json = serde_json::to_string_pretty(entry)
-            .map_err(|e| AiError::ParseError(e.to_string()))?;
+        let log_json =
+            serde_json::to_string_pretty(entry).map_err(|e| AiError::ParseError(e.to_string()))?;
 
         let prompt = prompts::explain_log_prompt(&log_json);
 
-        debug!("Explaining log entry: {}", entry.insert_id.as_deref().unwrap_or("unknown"));
+        debug!(
+            "Explaining log entry: {}",
+            entry.insert_id.as_deref().unwrap_or("unknown")
+        );
 
         self.generate(&prompt).await
     }
@@ -186,8 +189,12 @@ Response:"#,
 
         // Parse JSON response
         let json: serde_json::Value = serde_json::from_str(
-            response.trim().trim_start_matches("```json").trim_end_matches("```")
-        ).map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
+            response
+                .trim()
+                .trim_start_matches("```json")
+                .trim_end_matches("```"),
+        )
+        .map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
 
         let intent_type = json["intent"].as_str().unwrap_or("QUESTION");
         let gcp_query = json["gcp_query"].as_str().unwrap_or("").to_string();
@@ -221,7 +228,7 @@ Response:"#,
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use racoon::ai::GeminiClient;
+    /// # use gcp_racoon::ai::GeminiClient;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = GeminiClient::from_env()?;
     /// let query = client.generate_query("errors from Cloud Run in the last hour").await?;
@@ -269,7 +276,7 @@ Response:"#,
         // Serialize logs (limit to avoid token limits)
         let logs_json: Vec<String> = entries
             .iter()
-            .take(10)  // Limit to 10 logs to avoid token limits
+            .take(10) // Limit to 10 logs to avoid token limits
             .filter_map(|e| serde_json::to_string(e).ok())
             .collect();
 
@@ -415,7 +422,10 @@ Your answer:"#,
     /// - top_p: 0.8
     /// - top_k: 40
     async fn generate(&self, prompt: &str) -> Result<String, AiError> {
-        let url = format!("{}/{}:generateContent?key={}", GEMINI_API_BASE, self.model, self.api_key);
+        let url = format!(
+            "{}/{}:generateContent?key={}",
+            GEMINI_API_BASE, self.model, self.api_key
+        );
 
         let request_body = GeminiRequest {
             contents: vec![Content {
@@ -424,18 +434,14 @@ Your answer:"#,
                 }],
             }],
             generation_config: Some(GenerationConfig {
-                temperature: Some(0.3),  // Lower temperature for more consistent output
+                temperature: Some(0.3), // Lower temperature for more consistent output
                 max_output_tokens: Some(1024),
                 top_p: Some(0.8),
                 top_k: Some(40),
             }),
         };
 
-        let response = self.http
-            .post(&url)
-            .json(&request_body)
-            .send()
-            .await?;
+        let response = self.http.post(&url).json(&request_body).send().await?;
 
         let status = response.status();
 
@@ -449,12 +455,18 @@ Your answer:"#,
             if error_body.contains("API_KEY_INVALID") {
                 return Err(AiError::InvalidApiKey);
             }
-            return Err(AiError::ApiError(format!("HTTP {}: {}", status, error_body)));
+            return Err(AiError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
         }
 
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(AiError::ApiError(format!("HTTP {}: {}", status, error_body)));
+            return Err(AiError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
         }
 
         // Parse response
@@ -478,29 +490,29 @@ Your answer:"#,
 /// Get API key from environment or config file.
 fn get_api_key() -> Option<String> {
     // 1. Try environment variable first
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-        if !key.is_empty() {
-            debug!("Using API key from GEMINI_API_KEY environment variable");
-            return Some(key);
-        }
+    if let Ok(key) = std::env::var("GEMINI_API_KEY")
+        && !key.is_empty()
+    {
+        debug!("Using API key from GEMINI_API_KEY environment variable");
+        return Some(key);
     }
 
     // 2. Try config file
     let config_path = dirs::config_dir()?.join("racoon/config.toml");
 
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            // Simple TOML parsing for api_key = "..."
-            for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with("gemini_api_key") || line.starts_with("api_key") {
-                    if let Some(value) = line.split('=').nth(1) {
-                        let key = value.trim().trim_matches('"').trim_matches('\'');
-                        if !key.is_empty() {
-                            debug!("Using API key from {:?}", config_path);
-                            return Some(key.to_string());
-                        }
-                    }
+    if config_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&config_path)
+    {
+        // Simple TOML parsing for api_key = "..."
+        for line in content.lines() {
+            let line = line.trim();
+            if (line.starts_with("gemini_api_key") || line.starts_with("api_key"))
+                && let Some(value) = line.split('=').nth(1)
+            {
+                let key = value.trim().trim_matches('"').trim_matches('\'');
+                if !key.is_empty() {
+                    debug!("Using API key from {:?}", config_path);
+                    return Some(key.to_string());
                 }
             }
         }

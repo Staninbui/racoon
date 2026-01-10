@@ -8,17 +8,22 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, error, warn, Level};
-use tracing_subscriber::FmtSubscriber;
 use colored::Colorize;
+use tracing::{Level, error, info, warn};
+use tracing_subscriber::FmtSubscriber;
 
-use gcp_racoon::cli::{Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
+use gcp_racoon::ai::GeminiClient;
+use gcp_racoon::cli::{
+    Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, ExportArgs, QueryArgs, TailArgs,
+    ViewArgs,
+};
 use gcp_racoon::config::Config;
 use gcp_racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
-use gcp_racoon::ui::{App, run_app};
-use gcp_racoon::ai::GeminiClient;
-use gcp_racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
+use gcp_racoon::storage::{
+    ExportFormat, ExportOptions, export_logs, export_logs_with_ai, import_logs,
+};
 use gcp_racoon::ui::theme::Theme;
+use gcp_racoon::ui::{App, run_app};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,18 +91,16 @@ fn init_tracing(level: &str) -> Result<()> {
 /// handle tail command
 async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     // Use config default for project if not specified
-    let project = args.project
+    let project = args
+        .project
         .or_else(|| config.defaults.project.clone())
-        .ok_or_else(|| anyhow::anyhow!(
-            "Project required. Use --project or set in config file."
-        ))?;
+        .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
 
     // Apply theme
-    let theme = Theme::from_str(&config.ui.theme);
+    let theme = Theme::parse(&config.ui.theme);
 
     // Use config default for since
-    let since_str = args.since.as_deref()
-        .unwrap_or(&config.defaults.since);
+    let since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
 
     let duration = gcp_racoon::parse_duration_chrono(since_str)
         .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
@@ -146,8 +149,7 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
 
     // Create app state
-    let app = App::new(project.clone())
-        .with_theme(theme);
+    let app = App::new(project.clone()).with_theme(theme);
 
     // Run TUI
     run_app(app, rx, gemini, Some(client)).await?;
@@ -161,7 +163,9 @@ async fn handle_projects() -> Result<()> {
     println!("{}", "Fetching GCP projects...".dimmed());
 
     let auth = GcpAuth::new().await.context("Authentication failed")?;
-    auth.verify().await.context("GCP credentials verification failed")?;
+    auth.verify()
+        .await
+        .context("GCP credentials verification failed")?;
 
     let client = ProjectsClient::new(auth);
 
@@ -172,7 +176,10 @@ async fn handle_projects() -> Result<()> {
         return Ok(());
     }
 
-    println!("\n{}", format!("Found {} projects:", projects.len()).green().bold());
+    println!(
+        "\n{}",
+        format!("Found {} projects:", projects.len()).green().bold()
+    );
     println!("{}", "─".repeat(60));
     println!("{:<40} {:<20}", "PROJECT ID".bold(), "NAME".bold());
     println!("{}", "─".repeat(60));
@@ -182,7 +189,10 @@ async fn handle_projects() -> Result<()> {
     }
 
     println!("{}", "─".repeat(60));
-    println!("\nUse {} to stream logs", "racoon tail --project <PROJECT_ID>".cyan());
+    println!(
+        "\nUse {} to stream logs",
+        "racoon tail --project <PROJECT_ID>".cyan()
+    );
 
     Ok(())
 }
@@ -265,18 +275,13 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
     };
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        let gemini = GeminiClient::from_config(&config)
-            .context("AI download requires GEMINI_API_KEY")?;
+        let gemini =
+            GeminiClient::from_config(config).context("AI download requires GEMINI_API_KEY")?;
 
         println!("🦝 Generating query: \"{}\"", ai_prompt);
 
-        let (query, result) = export_logs_with_ai(
-            &client,
-            &gemini,
-            ai_prompt,
-            &args.output,
-            options,
-        ).await?;
+        let (query, result) =
+            export_logs_with_ai(&client, &gemini, ai_prompt, &args.output, options).await?;
 
         println!("📋 Query: {}", query);
         result
@@ -291,12 +296,12 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
 
 /// handle query command
 async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
-    let project = args.project
+    let project = args
+        .project
         .or_else(|| config.defaults.project.clone())
         .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
 
-    let _since_str = args.since.as_deref()
-        .unwrap_or(&config.defaults.since);
+    let _since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
@@ -351,8 +356,7 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
 async fn handle_view(args: ViewArgs) -> Result<()> {
     println!("📂 Loading logs from: {}", args.file);
 
-    let result = import_logs(&args.file)
-        .context("Failed to import logs")?;
+    let result = import_logs(&args.file).context("Failed to import logs")?;
 
     println!("   Format: {}", result.format.name());
     println!("   Loaded: {} entries", result.count);
@@ -392,7 +396,10 @@ async fn handle_view(args: ViewArgs) -> Result<()> {
         }
 
         if result.count > args.limit {
-            println!("\n... and {} more (use --limit to see more)", result.count - args.limit);
+            println!(
+                "\n... and {} more (use --limit to see more)",
+                result.count - args.limit
+            );
         }
     }
 
@@ -407,7 +414,9 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
     let client = LogsClient::new(auth, args.project.clone());
 
     // Parse format
-    let format: ExportFormat = args.format.parse()
+    let format: ExportFormat = args
+        .format
+        .parse()
         .map_err(|e: String| anyhow::anyhow!(e))?;
 
     let options = ExportOptions {
@@ -424,18 +433,13 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
 
     let result = if let Some(ref ai_prompt) = args.ai {
         // AI-assisted export
-        let gemini = GeminiClient::from_config(config)
-            .context("AI export requires GEMINI_API_KEY")?;
+        let gemini =
+            GeminiClient::from_config(config).context("AI export requires GEMINI_API_KEY")?;
 
         println!("   🦝 AI query: \"{}\"", ai_prompt);
 
-        let (query, result) = export_logs_with_ai(
-            &client,
-            &gemini,
-            ai_prompt,
-            &args.output,
-            options,
-        ).await?;
+        let (query, result) =
+            export_logs_with_ai(&client, &gemini, ai_prompt, &args.output, options).await?;
 
         println!("   Generated filter: {}", query);
         result
@@ -472,7 +476,10 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
         ConfigAction::Init => {
             let path = Config::init()?;
             println!("{} {}", "Created:".green(), path.display());
-            println!("\nEdit with: {}", format!("$EDITOR {}", path.display()).cyan());
+            println!(
+                "\nEdit with: {}",
+                format!("$EDITOR {}", path.display()).cyan()
+            );
         }
 
         ConfigAction::Show => {
@@ -486,16 +493,23 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             println!();
 
             println!("{}", "[ai]".cyan());
-            println!("  api_key: {}",
-                     config.ai.api_key.as_ref()
-                         .map(|k| format!("{}...", &k[..8.min(k.len())]))
-                         .unwrap_or_else(|| "(not set)".dimmed().to_string())
+            println!(
+                "  api_key: {}",
+                config
+                    .ai
+                    .api_key
+                    .as_ref()
+                    .map(|k| format!("{}...", &k[..8.min(k.len())]))
+                    .unwrap_or_else(|| "(not set)".dimmed().to_string())
             );
             println!("  model: {}", config.ai.model);
             println!();
 
             println!("{}", "[defaults]".cyan());
-            println!("  project: {}", config.defaults.project.as_deref().unwrap_or("(not set)"));
+            println!(
+                "  project: {}",
+                config.defaults.project.as_deref().unwrap_or("(not set)")
+            );
             println!("  since: {}", config.defaults.since);
             println!("  limit: {}", config.defaults.limit);
             println!();
@@ -535,7 +549,9 @@ mod tests {
     fn test_init_tracing_valid_levels() {
         // Test various valid log levels
         // Note: We can only set the global subscriber once, so we test parsing logic
-        let valid_levels = ["trace", "debug", "info", "warn", "warning", "error", "INFO", "DEBUG"];
+        let valid_levels = [
+            "trace", "debug", "info", "warn", "warning", "error", "INFO", "DEBUG",
+        ];
 
         for level in valid_levels {
             let parsed = match level.to_lowercase().as_str() {

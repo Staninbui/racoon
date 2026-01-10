@@ -66,7 +66,7 @@ pub struct ImportResult {
 /// # Example
 ///
 /// ```rust,no_run
-/// use racoon::storage::import_logs;
+/// use gcp_racoon::storage::import_logs;
 ///
 /// let result = import_logs("logs.json")?;
 /// println!("Loaded {} logs", result.count);
@@ -116,8 +116,8 @@ fn import_json(path: &Path) -> Result<Vec<LogEntry>, ImportError> {
     let reader = BufReader::new(file);
 
     // Try to parse as wrapped format first (with _metadata)
-    let value: serde_json::Value = serde_json::from_reader(reader)
-        .map_err(|e| ImportError::Parse {
+    let value: serde_json::Value =
+        serde_json::from_reader(reader).map_err(|e| ImportError::Parse {
             line: e.line(),
             message: e.to_string(),
         })?;
@@ -125,8 +125,8 @@ fn import_json(path: &Path) -> Result<Vec<LogEntry>, ImportError> {
     // Check if it's wrapped format
     if let Some(entries) = value.get("entries") {
         debug!("Detected wrapped JSON format with metadata");
-        let entries: Vec<LogEntry> = serde_json::from_value(entries.clone())
-            .map_err(|e| ImportError::Parse {
+        let entries: Vec<LogEntry> =
+            serde_json::from_value(entries.clone()).map_err(|e| ImportError::Parse {
                 line: 0,
                 message: format!("Failed to parse entries array: {}", e),
             })?;
@@ -136,8 +136,8 @@ fn import_json(path: &Path) -> Result<Vec<LogEntry>, ImportError> {
     // Try as plain array
     if value.is_array() {
         debug!("Detected plain JSON array format");
-        let entries: Vec<LogEntry> = serde_json::from_value(value)
-            .map_err(|e| ImportError::Parse {
+        let entries: Vec<LogEntry> =
+            serde_json::from_value(value).map_err(|e| ImportError::Parse {
                 line: 0,
                 message: format!("Failed to parse as array: {}", e),
             })?;
@@ -147,11 +147,10 @@ fn import_json(path: &Path) -> Result<Vec<LogEntry>, ImportError> {
     // Single entry
     if value.is_object() {
         debug!("Detected single JSON object");
-        let entry: LogEntry = serde_json::from_value(value)
-            .map_err(|e| ImportError::Parse {
-                line: 0,
-                message: format!("Failed to parse as log entry: {}", e),
-            })?;
+        let entry: LogEntry = serde_json::from_value(value).map_err(|e| ImportError::Parse {
+            line: 0,
+            message: format!("Failed to parse as log entry: {}", e),
+        })?;
         return Ok(vec![entry]);
     }
 
@@ -214,8 +213,8 @@ pub fn import_logs_limited(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     use std::io::Write;
+    use tempfile::tempdir;
 
     #[test]
     fn test_import_json_array() {
@@ -238,7 +237,12 @@ mod tests {
 
         let mut file = File::create(&path).unwrap();
         for _ in 0..3 {
-            writeln!(file, "{}", serde_json::to_string(&LogEntry::default()).unwrap()).unwrap();
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&LogEntry::default()).unwrap()
+            )
+            .unwrap();
         }
 
         let result = import_logs(&path).unwrap();

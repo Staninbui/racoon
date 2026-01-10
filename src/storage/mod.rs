@@ -16,8 +16,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use racoon::storage::{export_logs, import_logs, ExportOptions, ExportFormat};
-//! use racoon::gcp::{LogsClient, LogFilter};
+//! use gcp_racoon::storage::{export_logs, import_logs, ExportOptions, ExportFormat};
+//! use gcp_racoon::gcp::{LogsClient, LogFilter};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -36,9 +36,9 @@
 //! }
 //! ```
 pub mod export;
-pub mod import;
 pub mod formats;
+pub mod import;
 
-pub use export::{export_logs, export_logs_with_ai, ExportOptions, ExportResult};
+pub use export::{ExportOptions, ExportResult, export_logs, export_logs_with_ai};
 pub use formats::ExportFormat;
-pub use import::{import_logs, ImportResult};
+pub use import::{ImportResult, import_logs};

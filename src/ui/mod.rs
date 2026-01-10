@@ -12,8 +12,8 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use racoon::ui::{App, run_app};
-//! use racoon::gcp::LogEntry;
+//! use gcp_racoon::ui::{App, run_app};
+//! use gcp_racoon::gcp::LogEntry;
 //! use tokio::sync::mpsc;
 //!
 //! #[tokio::main]
@@ -26,24 +26,24 @@
 //! ```
 pub mod app;
 pub mod input;
-pub mod widgets;
 pub mod theme;
+pub mod widgets;
 
 pub use app::{App, InputMode};
 
 use std::io;
 use std::time::Duration;
 
-use anyhow::{Result};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc;
 
-use crate::gcp::{LogEntry, LogsClient};
 use crate::ai::{GeminiClient, UserIntent};
-use widgets::{render_detail_pane, render_input_bar, render_log_list, render_ai_pane};
+use crate::gcp::{LogEntry, LogsClient};
 use crate::ui::theme::Theme;
+use widgets::{render_ai_pane, render_detail_pane, render_input_bar, render_log_list};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -51,7 +51,7 @@ type Term = Terminal<CrosstermBackend<io::Stdout>>;
 #[derive(Debug)]
 pub enum AiRequest {
     /// Explain a single log entry.
-    ExplainLog(LogEntry),
+    ExplainLog(Box<LogEntry>),
     /// Ask a question and get an analyzed answer.
     AskQuestion(String),
 }
@@ -68,10 +68,7 @@ pub enum AiResponse {
         answer: String,
     },
     /// Filter set by AI.
-    FilterSet {
-        filter: String,
-        message: String,
-    },
+    FilterSet { filter: String, message: String },
     /// Error occurred.
     Error(String),
 }
@@ -106,27 +103,31 @@ pub async fn run_app(
         tokio::spawn(async move {
             while let Some(request) = ai_request_rx.recv().await {
                 let result = match request {
-                    AiRequest::ExplainLog(entry) => {
-                        match client.explain_log(&entry).await {
-                            Ok(text) => AiResponse::Explanation(text),
-                            Err(e) => AiResponse::Error(e.to_string()),
-                        }
-                    }
+                    AiRequest::ExplainLog(entry) => match client.explain_log(&entry).await {
+                        Ok(text) => AiResponse::Explanation(text),
+                        Err(e) => AiResponse::Error(e.to_string()),
+                    },
                     AiRequest::AskQuestion(input) => {
                         // First detect intent
                         match client.detect_intent(&input).await {
-                            Ok(UserIntent::SetFilter { filter, description }) => {
+                            Ok(UserIntent::SetFilter {
+                                filter,
+                                description,
+                            }) => {
                                 // Just return the filter to set
                                 AiResponse::FilterSet {
                                     filter: filter.clone(),
-                                    message: format!("✅ Already set filter: {}\n\n{}", filter, description),
+                                    message: format!(
+                                        "✅ Already set filter: {}\n\n{}",
+                                        filter, description
+                                    ),
                                 }
                             }
                             Ok(UserIntent::Question { question }) => {
                                 // Normal Q&A flow
                                 if let Some(ref lc) = logs_client {
                                     match client.ask_question(&question, lc).await {
-                                        Ok(qa) => AiResponse::QuestionAnswer{
+                                        Ok(qa) => AiResponse::QuestionAnswer {
                                             query: qa.query,
                                             log_count: qa.log_count,
                                             answer: qa.answer,
@@ -137,19 +138,20 @@ pub async fn run_app(
                                     AiResponse::Error("Logs client not available".to_string())
                                 }
                             }
-                            Ok(UserIntent::GenerateQuery { query }) => {
-                                AiResponse::FilterSet {
-                                    filter: query.clone(),
-                                    message: format!("📋 Generated query: {}\n\n(already set as filter)", query),
-                                }
-                            }
+                            Ok(UserIntent::GenerateQuery { query }) => AiResponse::FilterSet {
+                                filter: query.clone(),
+                                message: format!(
+                                    "📋 Generated query: {}\n\n(already set as filter)",
+                                    query
+                                ),
+                            },
                             Err(e) => AiResponse::Error(e.to_string()),
                         }
                     }
                 };
 
                 if ai_tx_clone.send(result).await.is_err() {
-                    break;  // Main task dropped, exit
+                    break; // Main task dropped, exit
                 }
             }
         });
@@ -161,7 +163,11 @@ pub async fn run_app(
     terminal.clear()?;
 
     // Store the request sender in a local variable for the event loop
-    let ai_request_tx = if app.ai_available { Some(ai_request_tx) } else { None };
+    let ai_request_tx = if app.ai_available {
+        Some(ai_request_tx)
+    } else {
+        None
+    };
 
     // Main event loop
     let result = run_event_loop(
@@ -170,7 +176,8 @@ pub async fn run_app(
         &mut log_rx,
         &mut ai_rx,
         ai_request_tx.as_ref(),
-    ).await;
+    )
+    .await;
 
     // Restore terminal (always, even on error)
     ratatui::restore();
@@ -193,35 +200,35 @@ async fn run_event_loop(
         })?;
 
         // 2. Handle events (non-blocking with timeout)
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle Ctrl+C globally
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    app.should_quit = true;
-                }
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            // Handle Ctrl+C globally
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                app.should_quit = true;
+            }
 
-                // Delegate to event handler
-                let action = input::handle_key_event(app, key);
+            // Delegate to event handler
+            let action = input::handle_key_event(app, key);
 
-                // Process any AI actions
-                if let Some(tx) = ai_tx {
-                    match action {
-                        input::Action::ExplainLog => {
-                            if let Some(entry) = app.selected_log().cloned() {
-                                app.start_ai_loading();
-                                let _ = tx.send(AiRequest::ExplainLog(entry)).await;
-                            }
-                        }
-                        input::Action::AskQuestion(question) => {
+            // Process any AI actions
+            if let Some(tx) = ai_tx {
+                match action {
+                    input::Action::ExplainLog => {
+                        if let Some(entry) = app.selected_log().cloned() {
                             app.start_ai_loading();
-                            app.ai_query = Some(question.clone());  // Store the question
-                            let _ = tx.send(AiRequest::AskQuestion(question)).await;
+                            let _ = tx.send(AiRequest::ExplainLog(Box::new(entry))).await;
                         }
-                        input::Action::GenerateQuery(_) => {
-                            // Keep for backward compatibility if needed
-                        }
-                        input::Action::None => {}
                     }
+                    input::Action::AskQuestion(question) => {
+                        app.start_ai_loading();
+                        app.ai_query = Some(question.clone()); // Store the question
+                        let _ = tx.send(AiRequest::AskQuestion(question)).await;
+                    }
+                    input::Action::GenerateQuery(_) => {
+                        // Keep for backward compatibility if needed
+                    }
+                    input::Action::None => {}
                 }
             }
         }
@@ -295,8 +302,8 @@ fn render_ui(frame: &mut Frame, app: &App) {
     let detail_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(50),  // AI response
-            Constraint::Percentage(50),  // Detail pane
+            Constraint::Percentage(50), // AI response
+            Constraint::Percentage(50), // Detail pane
         ])
         .split(main_chunks[2]);
 
@@ -319,29 +326,33 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Theme::Dark => "🌙",
         Theme::Light => "☀️",
     };
-    let status = if app.is_streaming { "● LIVE" } else { "○ PAUSED" };
+    let status = if app.is_streaming {
+        "● LIVE"
+    } else {
+        "○ PAUSED"
+    };
     let status_style = if app.is_streaming {
-        Style::default().fg(colors.status_live).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(colors.status_live)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(colors.status_paused)
     };
 
     let header_text = format!(
         " 🦝 racoon │ {} │ {} logs │ {} │ ",
-        project,
-        log_count,
-        theme_indicator,
+        project, log_count, theme_indicator,
     );
 
     let header = Paragraph::new(Line::from(vec![
         Span::styled(header_text, colors.header_style()),
         Span::styled(status, status_style),
     ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(colors.border_focused_style())
-        );
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(colors.border_focused_style()),
+    );
 
     frame.render_widget(header, area);
 }

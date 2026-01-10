@@ -47,7 +47,11 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             " Logs ({}) - Search: '{}' [{}/{}], n/N: next/prev, Esc: clear",
             logs.len(),
             query,
-            if app.search_matches.is_empty() { 0 } else { app.search_match_index + 1 },
+            if app.search_matches.is_empty() {
+                0
+            } else {
+                app.search_match_index + 1
+            },
             app.search_matches.len()
         )
     } else {
@@ -63,14 +67,14 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(colors.border_focused_style())
+                .border_style(colors.border_focused_style()),
         )
         .highlight_style(colors.selection_style());
 
     // Create list state with selection and scroll offset
     let mut state = ListState::default();
     state.select(Some(app.selected_index));
-    *state.offset_mut() = offset;  // Keep selection centered
+    *state.offset_mut() = offset; // Keep selection centered
 
     frame.render_stateful_widget(list, area, &mut state);
 }

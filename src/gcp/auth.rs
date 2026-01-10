@@ -9,7 +9,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use racoon::gcp::GcpAuth;
+//! use gcp_racoon::gcp::GcpAuth;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -26,10 +26,10 @@
 //! }
 //! ```
 
-use std::fmt::Formatter;
 use gcp_auth::TokenProvider;
-use thiserror::Error;
+use std::fmt::Formatter;
 use std::sync::Arc;
+use thiserror::Error;
 
 /// OAuth2 scopes required for Cloud Logging read access.
 const LOGGING_SCOPES: &[&str] = &[
@@ -44,8 +44,10 @@ pub enum AuthError {
     ///
     /// This typically means that user needs to run:
     /// `gcloud auth application-default login`
-    #[error("No valid credentials found on the system, Run `gcloud auth application-default login` \
-    or set GOOGLE_APPLICATION_CREDENTIALS")]
+    #[error(
+        "No valid credentials found on the system, Run `gcloud auth application-default login` \
+    or set GOOGLE_APPLICATION_CREDENTIALS"
+    )]
     NoCredentials,
 
     /// Credentials exist but token refresh failed.
@@ -96,7 +98,7 @@ impl GcpAuth {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use racoon::gcp::GcpAuth;
+    /// use gcp_racoon::gcp::GcpAuth;
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -107,19 +109,17 @@ impl GcpAuth {
     /// }
     /// ```
     pub async fn new() -> Result<Self, AuthError> {
-        let provider = gcp_auth::provider()
-            .await
-            .map_err(|e| {
-                let error_msg = e.to_string();
-                if error_msg.contains("Could not find default credentials")
-                    || error_msg.contains("No credentials")
-                    || error_msg.contains("unable to initialize")
-                {
-                    AuthError::NoCredentials
-                } else {
-                    AuthError::ApiError(error_msg)
-                }
-            })?;
+        let provider = gcp_auth::provider().await.map_err(|e| {
+            let error_msg = e.to_string();
+            if error_msg.contains("Could not find default credentials")
+                || error_msg.contains("No credentials")
+                || error_msg.contains("unable to initialize")
+            {
+                AuthError::NoCredentials
+            } else {
+                AuthError::ApiError(error_msg)
+            }
+        })?;
 
         Ok(Self { provider })
     }
@@ -174,20 +174,20 @@ impl GcpAuth {
             return CredentialInfo {
                 source: CredentialSource::ServiceAccountFile,
                 details: Some(path),
-            }
+            };
         }
 
         // Check for ADC file in default location
-        let adc_path = dirs::home_dir()
-            .map(|h| h.join(".config/gcloud/application_default_credentials.json"));
+        let adc_path =
+            dirs::home_dir().map(|h| h.join(".config/gcloud/application_default_credentials.json"));
 
-        if let Some(path)  = adc_path {
-            if path.exists() {
-                return CredentialInfo {
-                    source: CredentialSource::ApplicationDefaultCredentials,
-                    details: Some(path.to_string_lossy().to_string()),
-                };
-            }
+        if let Some(path) = adc_path
+            && path.exists()
+        {
+            return CredentialInfo {
+                source: CredentialSource::ApplicationDefaultCredentials,
+                details: Some(path.to_string_lossy().to_string()),
+            };
         }
 
         // Fallback - might be running on GCE or other envs

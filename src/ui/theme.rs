@@ -14,7 +14,7 @@ pub enum Theme {
 
 impl Theme {
     /// Parse theme from string.
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "light" => Theme::Light,
             _ => Theme::Dark,
@@ -142,12 +142,12 @@ fn light_theme() -> ThemeColors {
         search_match_bg: Color::LightYellow,
 
         // AI pane
-        ai_fg: Color::Rgb(0, 100, 100),  // Teal
-        ai_border: Color::Rgb(180, 140, 0),  // Gold
+        ai_fg: Color::Rgb(0, 100, 100),     // Teal
+        ai_border: Color::Rgb(180, 140, 0), // Gold
         ai_loading: Color::Rgb(180, 140, 0),
 
         // Status
-        status_live: Color::Rgb(0, 140, 0),   // Dark green
+        status_live: Color::Rgb(0, 140, 0), // Dark green
         status_paused: Color::Rgb(180, 140, 0),
         error: Color::Rgb(180, 0, 0),
         success: Color::Rgb(0, 140, 0),

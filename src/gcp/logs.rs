@@ -10,7 +10,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use racoon::gcp::{GcpAuth, LogsClient, LogFilter};
+//! use gcp_racoon::gcp::{GcpAuth, LogsClient, LogFilter};
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+use super::auth::GcpAuth;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -36,7 +37,6 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
-use super::auth::GcpAuth;
 
 /// Cloud logging API base URL.
 const LOGGING_API_URL: &str = "https://logging.googleapis.com/v2/entries:list";
@@ -64,10 +64,7 @@ pub enum LogsError {
 
     /// API returned an error response
     #[error("API error ({code}): {message}")]
-    ApiError {
-        code: u16,
-        message: String,
-    },
+    ApiError { code: u16, message: String },
 
     /// Invalid filter syntax
     #[error("Invalid filter: {0}")]
@@ -106,7 +103,7 @@ impl LogsClient {
             project,
         }
     }
-    
+
     /// Get the project ID this client is configured for.
     pub fn project(&self) -> &str {
         &self.project
@@ -142,14 +139,19 @@ impl LogsClient {
         // Build the request body
         let request_body = ListEntriesRequest {
             resource_names: vec![format!("projects/{}", self.project)],
-            filter: if filter_str.is_empty() { None } else { Some(filter_str) },
+            filter: if filter_str.is_empty() {
+                None
+            } else {
+                Some(filter_str)
+            },
             order_by: Some("timestamp desc".to_string()),
             page_size: Some(page_size.min(1000)),
             page_token: None,
         };
 
         // Send request
-        let response = self.http
+        let response = self
+            .http
             .post(LOGGING_API_URL)
             .bearer_auth(&token)
             .json(&request_body)
@@ -190,13 +192,18 @@ impl LogsClient {
 
         let request_body = ListEntriesRequest {
             resource_names: vec![format!("projects/{}", self.project)],
-            filter: if filter_str.is_empty() { None } else { Some(filter_str) },
+            filter: if filter_str.is_empty() {
+                None
+            } else {
+                Some(filter_str)
+            },
             order_by: Some("timestamp desc".to_string()),
             page_size: Some(page_size.min(1000)),
             page_token: page_token.map(String::from),
         };
 
-        let response = self.http
+        let response = self
+            .http
             .post(LOGGING_API_URL)
             .bearer_auth(&token)
             .json(&request_body)
@@ -209,7 +216,7 @@ impl LogsClient {
             return Err(LogsError::ApiError {
                 code: status.as_u16(),
                 message: error_body,
-            })
+            });
         }
 
         let response_body: ListEntriesResponse = response
@@ -217,7 +224,10 @@ impl LogsClient {
             .await
             .map_err(|e| LogsError::ParseError(e.to_string()))?;
 
-        Ok((response_body.entries.unwrap_or_default(), response_body.next_page_token))
+        Ok((
+            response_body.entries.unwrap_or_default(),
+            response_body.next_page_token,
+        ))
     }
 
     /// Start streaming logs in real-time using polling.
@@ -239,7 +249,7 @@ impl LogsClient {
     /// # Example
     ///
     /// ```rust,no_run
-    /// # use racoon::gcp::{LogsClient, LogFilter};
+    /// # use gcp_racoon::gcp::{LogsClient, LogFilter};
     /// # async fn example(client: LogsClient) -> anyhow::Result<()> {
     /// let filter = LogFilter::new().severity_min("WARNING");
     /// let (mut rx, handle) = client.stream_entries(Some(filter), chrono::Duration::hours(1)).await?;
@@ -274,9 +284,8 @@ impl LogsClient {
 
         tokio::spawn(async move {
             let mut last_timestamp = initial_timestamp;
-            let mut interval = tokio::time::interval(
-                tokio::time::Duration::from_secs(POLL_INTERVAL_SECS)
-            );
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(POLL_INTERVAL_SECS));
 
             loop {
                 tokio::select! {
@@ -292,10 +301,10 @@ impl LogsClient {
                         match poll_logs(&http, &auth, &project, &poll_filter).await {
                             Ok(entries) => {
                                 // Update last_timestamp to the newest entry
-                                if let Some(newest) = entries.first() {
-                                    if let Some(ts) = newest.timestamp {
-                                        last_timestamp = ts;
-                                    }
+                                if let Some(newest) = entries.first()
+                                    && let Some(ts) = newest.timestamp
+                                {
+                                    last_timestamp = ts;
                                 }
 
                                 // Send entries (in reverse order so oldest first)
@@ -332,7 +341,11 @@ async fn poll_logs(
 
     let request_body = ListEntriesRequest {
         resource_names: vec![format!("projects/{}", project)],
-        filter: if filter_str.is_empty() { None } else { Some(filter_str) },
+        filter: if filter_str.is_empty() {
+            None
+        } else {
+            Some(filter_str)
+        },
         order_by: Some("timestamp desc".to_string()),
         page_size: Some(DEFAULT_PAGE_SIZE),
         page_token: None,
@@ -385,7 +398,7 @@ impl StreamHandle {
 /// # Example
 ///
 /// ```
-/// use racoon::gcp::LogFilter;
+/// use gcp_racoon::gcp::LogFilter;
 ///
 /// let filter = LogFilter::new()
 ///     .severity_min("ERROR")
@@ -411,13 +424,15 @@ impl LogFilter {
     /// Valid values: DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL, ALERT,
     /// EMERGENCY
     pub fn severity_min(mut self, severity: &str) -> Self {
-        self.parts.push(format!("severity>={}", severity.to_uppercase()));
+        self.parts
+            .push(format!("severity>={}", severity.to_uppercase()));
         self
     }
 
     /// Add an exact severity filter
     pub fn severity_exact(mut self, severity: &str) -> Self {
-        self.parts.push(format!("severity={}", severity.to_uppercase()));
+        self.parts
+            .push(format!("severity={}", severity.to_uppercase()));
         self
     }
 
@@ -425,7 +440,8 @@ impl LogFilter {
     ///
     /// Common values: cloud_run_revision, gke_container, gce_instance, cloud_function
     pub fn resource_type(mut self, resource_type: &str) -> Self {
-        self.parts.push(format!("resource.type=\"{}\"", resource_type));
+        self.parts
+            .push(format!("resource.type=\"{}\"", resource_type));
         self
     }
 
@@ -439,20 +455,23 @@ impl LogFilter {
 
     /// Add a timestamp filter lower bound.
     pub fn timestamp_after(mut self, timestamp: DateTime<Utc>) -> Self {
-        self.parts.push(format!("timestamp>\"{}\"", timestamp.to_rfc3339()));
+        self.parts
+            .push(format!("timestamp>\"{}\"", timestamp.to_rfc3339()));
         self
     }
 
     /// Add a timestamp filter upper bound.
     pub fn timestamp_before(mut self, timestamp: DateTime<Utc>) -> Self {
-        self.parts.push(format!("timestamp<=\"{}\"", timestamp.to_rfc3339()));
+        self.parts
+            .push(format!("timestamp<=\"{}\"", timestamp.to_rfc3339()));
         self
     }
 
     /// Add a timestamp range (last N duration)
     pub fn since(mut self, duration: chrono::Duration) -> Self {
         let since = Utc::now() - duration;
-        self.parts.push(format!("timestamp>=\"{}\"", since.to_rfc3339()));
+        self.parts
+            .push(format!("timestamp>=\"{}\"", since.to_rfc3339()));
         self
     }
 
@@ -479,7 +498,7 @@ impl LogFilter {
 ///
 /// This struct mirrors the structure returned by the Cloud Logging API.
 /// See [LogEntry reference](https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     /// Unique identifier assigned by Logging when the entry was created.
@@ -665,25 +684,6 @@ struct ListEntriesResponse {
     entries: Option<Vec<LogEntry>>,
     #[serde(default)]
     next_page_token: Option<String>,
-}
-
-impl Default for LogEntry {
-    fn default() -> Self {
-        Self {
-            insert_id: None,
-            timestamp: None,
-            receive_timestamp: None,
-            severity: None,
-            log_name: None,
-            text_payload: None,
-            json_payload: None,
-            resource: None,
-            labels: None,
-            http_request: None,
-            trace: None,
-            span_id: None,
-        }
-    }
 }
 
 // ============================================================================

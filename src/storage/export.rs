@@ -120,8 +120,8 @@ struct ExportWrapper {
 /// # Example
 ///
 /// ```rust,no_run
-/// use racoon::storage::{export_logs, ExportOptions};
-/// use racoon::gcp::{LogsClient, LogFilter};
+/// use gcp_racoon::storage::{export_logs, ExportOptions};
+/// use gcp_racoon::gcp::{LogsClient, LogFilter};
 ///
 /// # async fn example(client: LogsClient) -> Result<(), Box<dyn std::error::Error>> {
 /// let filter = LogFilter::new().severity_min("ERROR");
@@ -179,12 +179,10 @@ pub async fn export_logs(
                 } else {
                     serde_json::to_writer(&mut writer, &wrapper)?;
                 }
+            } else if options.pretty {
+                serde_json::to_writer_pretty(&mut writer, &entries)?;
             } else {
-                if options.pretty {
-                    serde_json::to_writer_pretty(&mut writer, &entries)?;
-                } else {
-                    serde_json::to_writer(&mut writer, &entries)?;
-                }
+                serde_json::to_writer(&mut writer, &entries)?;
             }
         }
         ExportFormat::Ndjson => {
@@ -200,11 +198,7 @@ pub async fn export_logs(
     // Get file size
     let size_bytes = std::fs::metadata(output_path)?.len();
 
-    info!(
-        count = count,
-        size_bytes = size_bytes,
-        "Export complete"
-    );
+    info!(count = count, size_bytes = size_bytes, "Export complete");
 
     Ok(ExportResult {
         count,
@@ -305,10 +299,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.ndjson");
 
-        let entries = vec![
-            LogEntry::default(),
-            LogEntry::default(),
-        ];
+        let entries = vec![LogEntry::default(), LogEntry::default()];
 
         let count = append_logs(&entries, &path).unwrap();
         assert_eq!(count, 2);

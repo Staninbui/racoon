@@ -106,7 +106,6 @@ impl Default for DefaultsConfig {
             since: default_since(),
             limit: default_limit(),
             severity: None,
-
         }
     }
 }

@@ -4,8 +4,8 @@
 //! when available.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::widgets::Scrollbar;
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ui::App;
 
@@ -14,8 +14,7 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
     let colors = app.colors();
     let content = if let Some(entry) = app.selected_log() {
         // Pretty-print the log entry as JSON
-        serde_json::to_string_pretty(entry)
-            .unwrap_or_else(|_| "[Failed to serialize]".to_string())
+        serde_json::to_string_pretty(entry).unwrap_or_else(|_| "[Failed to serialize]".to_string())
     } else {
         "No log selected".to_string()
     };
@@ -28,7 +27,7 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(" Detail (Ctrl+j/k to scroll) ")
                 .borders(Borders::ALL)
-                .border_style(colors.border_focused_style())
+                .border_style(colors.border_focused_style()),
         )
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
@@ -47,7 +46,10 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
 
         frame.render_stateful_widget(
             scrollbar,
-            area.inner(Margin { vertical: 1, horizontal: 0 }),
+            area.inner(Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
             &mut scrollbar_state,
         );
     }
@@ -66,7 +68,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(ref response) = app.ai_response {
         (response.clone(), colors.ai_style())
     } else {
-        let help = vec![
+        let help = [
             "Press 'e' to explain selected log",
             "Press '?' to ask a question about your logs",
             "",
@@ -74,7 +76,8 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             "  • Are there any errors today?",
             "  • 最近有发生过严重报错吗?",
             "  • What caused the timeout at 14:00?",
-        ].join("\n");
+        ]
+        .join("\n");
         (help, colors.dim_style())
     };
 
@@ -84,7 +87,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(" AI Analysis, Ctrl+n/p to scroll")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors.ai_border))
+                .border_style(Style::default().fg(colors.ai_border)),
         )
         .wrap(Wrap { trim: true })
         .scroll((app.ai_scroll, 0));

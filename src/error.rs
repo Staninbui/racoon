@@ -39,4 +39,3 @@ pub enum RacoonError {
 
 /// Result type alias for racoon operations.
 pub type Result<T> = std::result::Result<T, RacoonError>;
-

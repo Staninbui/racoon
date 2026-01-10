@@ -89,7 +89,10 @@ mod tests {
     #[test]
     fn test_format_from_str() {
         assert_eq!("json".parse::<ExportFormat>().unwrap(), ExportFormat::Json);
-        assert_eq!("ndjson".parse::<ExportFormat>().unwrap(), ExportFormat::Ndjson);
+        assert_eq!(
+            "ndjson".parse::<ExportFormat>().unwrap(),
+            ExportFormat::Ndjson
+        );
         assert!("invalid".parse::<ExportFormat>().is_err());
     }
 }

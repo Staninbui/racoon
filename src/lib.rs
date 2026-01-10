@@ -17,7 +17,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use racoon::gcp::GcpAuth;
+//! use gcp_racoon::gcp::GcpAuth;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -29,23 +29,20 @@
 //! }
 //! ```
 
-
+pub mod ai;
 pub mod cli;
+pub mod config;
 pub mod error;
 pub mod gcp;
-pub mod ui;
-pub mod ai;
 pub mod storage;
+pub mod ui;
 pub mod utils;
-pub mod config;
 
 // Re-exports
+pub use ai::GeminiClient;
+pub use config::Config;
 pub use error::{RacoonError, Result};
 pub use gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
+pub use storage::{ExportFormat, ExportOptions, export_logs, import_logs};
 pub use ui::{App, run_app};
-pub use ai::GeminiClient;
-pub use storage::{export_logs, import_logs, ExportFormat, ExportOptions};
 pub use utils::{parse_duration, parse_duration_chrono};
-pub use config::Config;
-
-

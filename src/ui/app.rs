@@ -3,8 +3,8 @@
 //! This module defines the core state that drives the UI, including
 //! the log buffer, selection state, and input handling.
 
-use crate::gcp::LogEntry;
 use super::theme::{Theme, ThemeColors};
+use crate::gcp::LogEntry;
 
 /// Maximum number of logs to keep in memory.
 const MAX_LOGS: usize = 100;
@@ -275,7 +275,8 @@ impl App {
         let query_lower = query.to_lowercase();
 
         // Find all matching log indices
-        self.search_matches = self.logs
+        self.search_matches = self
+            .logs
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
@@ -292,10 +293,10 @@ impl App {
                 }
 
                 // Search in full JSON (expensive but thorough)
-                if let Ok(json) = serde_json::to_string(entry) {
-                    if json.to_lowercase().contains(&query_lower) {
-                        return true;
-                    }
+                if let Ok(json) = serde_json::to_string(entry)
+                    && json.to_lowercase().contains(&query_lower)
+                {
+                    return true;
                 }
 
                 false
@@ -417,6 +418,7 @@ mod tests {
     #[test]
     fn test_app_navigation() {
         let mut app = App::new("test".to_string());
+        app.is_streaming = false; // Disable auto-follow for testing
 
         for i in 0..10 {
             let mut entry = LogEntry::default();
