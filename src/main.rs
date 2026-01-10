@@ -12,7 +12,8 @@ use tracing::{info, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use colored::Colorize;
 
-use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
+use racoon::cli::{Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
+use racoon::config::Config;
 use racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
 use racoon::ui::{App, run_app};
 use racoon::ai::GeminiClient;
@@ -23,20 +24,25 @@ async fn main() -> Result<()> {
     // parse command line arguments
     let cli = Cli::parse();
 
+    // load config
+    let config = Config::load();
+
     // initialize tracing
-    init_tracing(&cli.log_level)?;
+    let log_level = config.logging.level.clone();
+    init_tracing(&log_level)?;
 
     info!("racoon staring up 🦝");
 
     // Dispatch to command handlers
     let result = match cli.command {
-        Commands::Tail(args) => handle_tail(args).await,
+        Commands::Tail(args) => handle_tail(args, &config).await,
         Commands::Projects => handle_projects().await,
         Commands::Auth => handle_auth().await,
-        Commands::Download(args) => handle_download(args).await,
-        Commands::Query(args) => handle_query(args).await,
-        Commands::Export(args) => handle_export(args).await,
+        Commands::Download(args) => handle_download(args, &config).await,
+        Commands::Query(args) => handle_query(args, &config).await,
+        Commands::Export(args) => handle_export(args, &config).await,
         Commands::View(args) => handle_view(args).await,
+        Commands::Config(args) => handle_config(args),
     };
 
     // Handle errors gracefully at the top level
@@ -77,16 +83,19 @@ fn init_tracing(level: &str) -> Result<()> {
 }
 
 /// handle tail command
-async fn handle_tail(args: TailArgs) -> Result<()> {
-    info!(
-        project = %args.project,
-        filter = ?args.filter,
-        severity = ?args.severity,
-        since = %args.since,
-        "Starting log tail"
-    );
+async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
+    // Use config default for project if not specified
+    let project = args.project
+        .or_else(|| config.defaults.project.clone())
+        .ok_or_else(|| anyhow::anyhow!(
+            "Project required. Use --project or set in config file."
+        ))?;
 
-    let duration = racoon::parse_duration_chrono(&args.since)
+    // Use config default for since
+    let since_str = args.since.as_deref()
+        .unwrap_or(&config.defaults.since);
+
+    let duration = racoon::parse_duration_chrono(since_str)
         .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
     let auth = GcpAuth::new()
@@ -100,7 +109,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
     println!("✅ Connected to GCP");
 
     // Try to initialize Gemini client
-    let gemini = match GeminiClient::from_env() {
+    let gemini = match GeminiClient::from_config(config) {
         Ok(client) => {
             info!("AI features enabled (Gemini)");
             Some(client)
@@ -111,7 +120,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
         }
     };
 
-    let client = LogsClient::new(auth.clone(), args.project.clone());
+    let client = LogsClient::new(auth.clone(), project.clone());
 
     let mut filter = LogFilter::new().since(duration);
 
@@ -133,7 +142,7 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
     let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
 
     // Create app state
-    let app = App::new(args.project.clone());
+    let app = App::new(project.clone());
 
     // Run TUI
     run_app(app, rx, gemini, Some(client)).await?;
@@ -223,7 +232,7 @@ async fn handle_auth() -> Result<()> {
 }
 
 // handle download command
-async fn handle_download(args: DownloadArgs) -> Result<()> {
+async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
     info!(
         project = %args.project,
         output = %args.output,
@@ -251,7 +260,7 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
     };
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        let gemini = GeminiClient::from_env()
+        let gemini = GeminiClient::from_config(&config)
             .context("AI download requires GEMINI_API_KEY")?;
 
         println!("🦝 Generating query: \"{}\"", ai_prompt);
@@ -276,14 +285,15 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
 }
 
 /// handle query command
-async fn handle_query(args: QueryArgs) -> Result<()> {
-    info!(
-        project = %args.project,
-        filter = ?args.filter,
-        limit = args.limit,
-        json = args.json,
-        "Executing query"
-    );
+async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
+    let project = args.project
+        .or_else(|| config.defaults.project.clone())
+        .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
+
+    let _since_str = args.since.as_deref()
+        .unwrap_or(&config.defaults.since);
+
+    let limit = args.limit.unwrap_or(config.defaults.limit);
 
     // Initialize and verify authentication
     let auth = GcpAuth::new()
@@ -296,13 +306,13 @@ async fn handle_query(args: QueryArgs) -> Result<()> {
 
     println!("✅ Authentication successful!");
 
-    let client = LogsClient::new(auth, args.project.clone());
+    let client = LogsClient::new(auth, project.clone());
 
     // Build filter
     let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
 
     // Fetch logs
-    let entries = client.list_entries(filter.as_ref(), args.limit).await?;
+    let entries = client.list_entries(filter.as_ref(), limit).await?;
 
     if args.json {
         // JSON output
@@ -385,7 +395,7 @@ async fn handle_view(args: ViewArgs) -> Result<()> {
 }
 
 /// Handle `racoon export` - advanced export with options
-async fn handle_export(args: ExportArgs) -> Result<()> {
+async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
     let auth = GcpAuth::new().await.context("Authentication failed")?;
     auth.verify().await?;
 
@@ -409,7 +419,7 @@ async fn handle_export(args: ExportArgs) -> Result<()> {
 
     let result = if let Some(ref ai_prompt) = args.ai {
         // AI-assisted export
-        let gemini = GeminiClient::from_env()
+        let gemini = GeminiClient::from_config(config)
             .context("AI export requires GEMINI_API_KEY")?;
 
         println!("   🦝 AI query: \"{}\"", ai_prompt);
@@ -440,6 +450,74 @@ async fn handle_export(args: ExportArgs) -> Result<()> {
     println!("   Entries: {}", result.count);
     println!("   Size: {} bytes", result.size_bytes);
     println!("   File: {}", result.path);
+
+    Ok(())
+}
+
+/// Handle `racoon config` - manage configuration.
+fn handle_config(args: ConfigArgs) -> Result<()> {
+    use colored::Colorize;
+
+    match args.action {
+        ConfigAction::Path => {
+            let path = Config::default_path();
+            println!("{}", path.display());
+        }
+
+        ConfigAction::Init => {
+            let path = Config::init()?;
+            println!("{} {}", "Created:".green(), path.display());
+            println!("\nEdit with: {}", format!("$EDITOR {}", path.display()).cyan());
+        }
+
+        ConfigAction::Show => {
+            let config = Config::load();
+            let path = Config::default_path();
+
+            println!("{}", "Configuration".bold());
+            println!("{}", "─".repeat(50));
+            println!("Config file: {}", path.display());
+            println!("File exists: {}", path.exists());
+            println!();
+
+            println!("{}", "[ai]".cyan());
+            println!("  api_key: {}",
+                     config.ai.api_key.as_ref()
+                         .map(|k| format!("{}...", &k[..8.min(k.len())]))
+                         .unwrap_or_else(|| "(not set)".dimmed().to_string())
+            );
+            println!("  model: {}", config.ai.model);
+            println!();
+
+            println!("{}", "[defaults]".cyan());
+            println!("  project: {}", config.defaults.project.as_deref().unwrap_or("(not set)"));
+            println!("  since: {}", config.defaults.since);
+            println!("  limit: {}", config.defaults.limit);
+            println!();
+
+            println!("{}", "[ui]".cyan());
+            println!("  max_logs: {}", config.ui.max_logs);
+            println!("  mouse: {}", config.ui.mouse);
+            println!("  theme: {}", config.ui.theme);
+        }
+
+        ConfigAction::Edit => {
+            let path = Config::default_path();
+
+            // Create when doesn't exist
+            if !path.exists() {
+                Config::init()?;
+            }
+
+            // Open in editor
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+
+            std::process::Command::new(&editor)
+                .arg(&path)
+                .status()
+                .with_context(|| format!("Failed to open editor: {}", editor))?;
+        }
+    }
 
     Ok(())
 }

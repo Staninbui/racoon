@@ -43,14 +43,17 @@ pub enum Commands {
 
     /// Export logs with advanced options
     Export(ExportArgs),
+
+    /// Manage configuration
+    Config(ConfigArgs),
 }
 
 /// the arguments for tail command
 #[derive(Parser, Debug)]
 pub struct TailArgs {
-    /// GCP project ID(required)
+    /// GCP project ID (uses config default if not specified)
     #[arg(short, long)]
-    pub project: String,
+    pub project: Option<String>,
 
     /// GCP logging query filters
     ///
@@ -71,11 +74,11 @@ pub struct TailArgs {
     #[arg(short, long)]
     pub resource: Option<String>,
 
-    /// time range of logs
+    /// time range of logs (uses config default if not specified)
     ///
     /// for example: 30s, 5m, 1h, 2d
-    #[arg(long, default_value = "1h")]
-    pub since: String,
+    #[arg(long)]
+    pub since: Option<String>,
 }
 
 /// the arguments for download command
@@ -107,17 +110,21 @@ pub struct DownloadArgs {
 /// the arguments for query command
 #[derive(Parser, Debug)]
 pub struct QueryArgs {
-    /// gcp project id
+    /// gcp project id (uses config default if not specified)
     #[arg(short, long)]
-    pub project: String,
+    pub project: Option<String>,
 
     /// gcp logging filter
     #[arg(short, long)]
     pub filter: Option<String>,
 
+    /// time range of logs (e.g., 30s, 5m, 1h, 2d)
+    #[arg(long)]
+    pub since: Option<String>,
+
     /// log limit
-    #[arg(long, default_value = "50")]
-    pub limit: usize,
+    #[arg(long)]
+    pub limit: Option<usize>,
 
     /// output format
     #[arg(long)]
@@ -173,6 +180,29 @@ pub struct ExportArgs {
     /// Compact output (no pretty printing)
     #[arg(long)]
     pub compact: bool,
+}
+
+/// Config subcommands
+#[derive(Parser, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+/// Config subcommands.
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Show config file path
+    Path,
+
+    /// Initialize default config file
+    Init,
+
+    /// Show current configuration
+    Show,
+
+    /// Edit config file in default editor
+    Edit,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

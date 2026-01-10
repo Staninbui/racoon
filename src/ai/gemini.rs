@@ -12,10 +12,11 @@ use super::prompts;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::utils::sanitize_query;
 
-/// Gemini API endpoint for content generation.
+/// Gemini API base URL.
+const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
-const GEMINI_API_URL: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent";
+/// Default model name.
+const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
 
 /// Errors that can occur during AI operations.
 #[derive(Error, Debug)]
@@ -76,6 +77,8 @@ pub struct GeminiClient {
     http: Client,
     /// Gemini API key
     api_key: String,
+    /// Model name to use
+    model: String,
 }
 
 impl GeminiClient {
@@ -93,9 +96,15 @@ impl GeminiClient {
     /// let client = GeminiClient::new("your-api-key".to_string());
     /// ```
     pub fn new(api_key: String) -> Self {
+        Self::with_model(api_key, DEFAULT_MODEL.to_string())
+    }
+
+    /// Create a new GeminiClient with a specific model.
+    pub fn with_model(api_key: String, model: String) -> Self {
         Self {
             http: Client::new(),
             api_key,
+            model,
         }
     }
 
@@ -109,8 +118,17 @@ impl GeminiClient {
     ///
     /// Returns `AiError::NoApiKey` if no API key is found.
     pub fn from_env() -> Result<Self, AiError> {
-        let api_key = get_api_key().ok_or(AiError::NoApiKey)?;
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .map_err(|_| AiError::NoApiKey)?;
         Ok(Self::new(api_key))
+    }
+
+    /// Create client from config (checks env var first, then config file).
+    pub fn from_config(config: &crate::config::Config) -> Result<Self, AiError> {
+        let api_key = config.get_api_key()
+            .ok_or(AiError::NoApiKey)?;
+        let model = config.ai.model.clone();
+        Ok(Self::with_model(api_key, model))
     }
 
     /// Check if an API key is available.
@@ -397,7 +415,7 @@ Your answer:"#,
     /// - top_p: 0.8
     /// - top_k: 40
     async fn generate(&self, prompt: &str) -> Result<String, AiError> {
-        let url = format!("{}?key={}", GEMINI_API_URL, self.api_key);
+        let url = format!("{}/{}:generateContent?key={}", GEMINI_API_BASE, self.model, self.api_key);
 
         let request_body = GeminiRequest {
             contents: vec![Content {

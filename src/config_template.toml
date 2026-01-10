@@ -1,0 +1,54 @@
+# Racoon Configuration
+# =====================
+# This file configures racoon - GCP Log Spy with AI
+#
+# Location: ~/.config/racoon/config.toml (Linux/macOS)
+#           %APPDATA%\racoon\config.toml (Windows)
+#
+# All values shown are defaults. Uncomment and modify as needed.
+
+# ------------------------------------------------------------------------------
+# AI Settings (Gemini)
+# ------------------------------------------------------------------------------
+[ai]
+# Gemini API key. You can also set GEMINI_API_KEY environment variable.
+# api_key = "your-api-key-here"
+
+# Model to use for AI features
+# model = "gemini-3-flash-preview"
+
+# ------------------------------------------------------------------------------
+# Default Values
+# ------------------------------------------------------------------------------
+[defaults]
+# Default GCP project (can be overridden with --project)
+# project = "my-project-123"
+
+# Default time range for log queries
+# since = "1h"
+
+# Default maximum number of logs to fetch
+# limit = 100
+
+# Default severity filter (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+# severity = "INFO"
+
+# ------------------------------------------------------------------------------
+# UI Settings
+# ------------------------------------------------------------------------------
+[ui]
+# Maximum number of logs to keep in TUI memory
+# max_logs = 100
+
+# Enable mouse support in TUI
+# mouse = false
+
+# Color theme (dark/light)
+# theme = "dark"
+
+# ------------------------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------------------------
+[logging]
+# Log level for racoon itself (debug, info, warn, error)
+# level = "info"

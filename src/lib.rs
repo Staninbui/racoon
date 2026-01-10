@@ -12,6 +12,7 @@
 //! - [`ui`]: User interface for log streaming and analysis.
 //! - [`error`]: Application-level error types.
 //! - [`utils`]: Utility functions.
+//! - [`config`]: Configuration management.
 //!
 //! # Example
 //!
@@ -36,6 +37,7 @@ pub mod ui;
 pub mod ai;
 pub mod storage;
 pub mod utils;
+pub mod config;
 
 // Re-exports
 pub use error::{RacoonError, Result};
@@ -44,4 +46,6 @@ pub use ui::{App, run_app};
 pub use ai::GeminiClient;
 pub use storage::{export_logs, import_logs, ExportFormat, ExportOptions};
 pub use utils::{parse_duration, parse_duration_chrono};
+pub use config::Config;
+
 
