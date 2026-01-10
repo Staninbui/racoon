@@ -1,22 +1,14 @@
 # Build stage
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 WORKDIR /app
 
-# Copy manifests and config template
+# Copy everything needed for build
 COPY Cargo.toml Cargo.lock config_template.toml ./
-
-# Create dummy src for caching dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs && mkdir -p src/ai src/gcp src/storage src/ui && touch src/lib.rs src/ai/mod.rs src/gcp/mod.rs src/storage/mod.rs src/ui/mod.rs
-
-# Build dependencies (this layer will be cached)
-RUN cargo build --release && rm -rf src
-
-# Copy actual source code
 COPY src ./src
 
 # Build the application
-RUN touch src/main.rs && cargo build --release
+RUN cargo build --release
 
 # Runtime stage
 FROM debian:bookworm-slim
