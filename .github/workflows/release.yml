@@ -56,7 +56,7 @@ jobs:
       - name: Build
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }} --features vendored-openssl
           else
             cargo build --release --target ${{ matrix.target }}
           fi

@@ -64,3 +64,10 @@ tempfile = "3.24.0"
 
 # color
 colored = "2"
+
+# OpenSSL vendored for cross-compilation
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
+[features]
+default = []
+vendored-openssl = ["openssl"]

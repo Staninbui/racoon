@@ -30,28 +30,28 @@ Download the latest release for your platform:
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/YOUR_USERNAME/racoon/releases/latest/download/racoon-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv racoon /usr/local/bin/
+curl -L https://github.com/Staninbui/racoon/releases/latest/download/gcp-racoon-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv gcp-racoon /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/YOUR_USERNAME/racoon/releases/latest/download/racoon-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv racoon /usr/local/bin/
+curl -L https://github.com/Staninbui/racoon/releases/latest/download/gcp-racoon-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv gcp-racoon /usr/local/bin/
 
 # Linux (x86_64)
-curl -L https://github.com/YOUR_USERNAME/racoon/releases/latest/download/racoon-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv racoon /usr/local/bin/
+curl -L https://github.com/Staninbui/racoon/releases/latest/download/gcp-racoon-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv gcp-racoon /usr/local/bin/
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/YOUR_USERNAME/racoon/releases/latest/download/racoon-x86_64-pc-windows-msvc.zip -OutFile racoon.zip
-Expand-Archive racoon.zip -DestinationPath .
-Move-Item racoon.exe C:\Windows\System32\
+Invoke-WebRequest -Uri https://github.com/Staninbui/racoon/releases/latest/download/gcp-racoon-x86_64-pc-windows-msvc.zip -OutFile gcp-racoon.zip
+Expand-Archive gcp-racoon.zip -DestinationPath .
+Move-Item gcp-racoon.exe C:\Windows\System32\
 ```
 
 ### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/racoon.git
+git clone https://github.com/Staninbui/racoon.git
 cd racoon
 
 # Build and install
@@ -61,27 +61,27 @@ cargo install --path .
 ### Using Cargo
 
 ```bash
-cargo install racoon
+cargo install gcp-racoon
 ```
 
 ### Using Docker
 
 ```bash
 # Pull the image
-docker pull YOUR_USERNAME/racoon:latest
+docker pull ghcr.io/staninbui/gcp-racoon:latest
 
 # Run directly
 docker run --rm -it \
     -v ~/.config/gcloud:/root/.config/gcloud:ro \
     -e GEMINI_API_KEY \
-    YOUR_USERNAME/racoon tail --project my-project
+    ghcr.io/staninbui/gcp-racoon tail --project my-project
 
 # Create an alias for convenience
 alias racoon='docker run --rm -it \
     -v ~/.config/gcloud:/root/.config/gcloud:ro \
     -v ~/.config/racoon:/root/.config/racoon:ro \
     -e GEMINI_API_KEY \
-    YOUR_USERNAME/racoon'
+    ghcr.io/staninbui/gcp-racoon'
 
 # Now use like a normal command
 racoon --help
@@ -90,8 +90,9 @@ racoon --help
 ### Using Homebrew (macOS/Linux)
 
 ```bash
-brew tap YOUR_USERNAME/tap
-brew install racoon
+# Coming soon
+# brew tap staninbui/tap
+# brew install gcp-racoon
 ```
 
 ---
