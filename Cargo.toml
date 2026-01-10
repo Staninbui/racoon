@@ -1,5 +1,5 @@
 [package]
-name = "racoon"
+name = "gcp-racoon"
 version = "0.1.0"
 edition = "2024"
 authors = ["Stan Yang <staninjapan1006@gmail.com>"]

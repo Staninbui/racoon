@@ -1,4 +1,4 @@
-# 🦝 Racoon
+# 🦝 gcp-racoon
 
 **GCP Log Spy with Gemini AI**
 
