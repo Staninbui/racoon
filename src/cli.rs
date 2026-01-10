@@ -37,6 +37,12 @@ pub enum Commands {
 
     /// check log in a single query
     Query(QueryArgs),
+
+    /// Load and view logs from a local file (offline mode)
+    View(ViewArgs),
+
+    /// Export logs with advanced options
+    Export(ExportArgs),
 }
 
 /// the arguments for tail command
@@ -116,6 +122,57 @@ pub struct QueryArgs {
     /// output format
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `racoon view` command.
+#[derive(Parser, Debug)]
+pub struct ViewArgs {
+    /// Path to the log file to view
+    pub file: String,
+
+    /// Maximum number of logs to load
+    #[arg(long, default_value = "100")]
+    pub limit: usize,
+
+    /// Output as JSON instead of TUI
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `racoon export` command.
+#[derive(Parser, Debug)]
+pub struct ExportArgs {
+    /// GCP Project ID
+    #[arg(short, long)]
+    pub project: String,
+
+    /// Output file path
+    #[arg(short, long)]
+    pub output: String,
+
+    /// GCP Logging filter
+    #[arg(short, long)]
+    pub filter: Option<String>,
+
+    /// Use AI to generate filter from natural language
+    #[arg(long)]
+    pub ai: Option<String>,
+
+    /// Maximum number of logs to export
+    #[arg(long, default_value = "1000")]
+    pub limit: usize,
+
+    /// Output format (json or ndjson)
+    #[arg(long, default_value = "json")]
+    pub format: String,
+
+    /// Don't include metadata in output
+    #[arg(long)]
+    pub no_metadata: bool,
+
+    /// Compact output (no pretty printing)
+    #[arg(long)]
+    pub compact: bool,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

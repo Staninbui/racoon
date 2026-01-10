@@ -10,6 +10,7 @@ use tracing::{debug};
 
 use super::prompts;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
+use crate::utils::sanitize_query;
 
 /// Gemini API endpoint for content generation.
 
@@ -544,33 +545,6 @@ struct Candidate {
 // Helper functions (outside impl block)
 // ============================================================================
 
-/// Sanitize an AI-generated query to make it valid for GCP Logging API.
-fn sanitize_query(query: &str) -> String {
-    let mut result = query.trim().to_string();
-
-    // Remove Markdown code blocks if present
-    result = result
-        .trim_start_matches("```")
-        .trim_start_matches("gcp")
-        .trim_start_matches("sql")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
-
-    // Remove any newlines (query should be single line)
-    result = result.replace('\n', " ").replace('\r', " ");
-
-    // Collapse multiple spaces
-    while result.contains("  ") {
-        result = result.replace("  ", " ");
-    }
-
-    // Convert patterns like timestamp>="-2h" to timestamp>="2026-01-09T16:00:00Z"
-    result = fix_relative_timestamps(&result);
-
-    result
-}
-
 /// Try to fetch logs with the given query, handling errors gracefully.
 async fn fetch_logs_with_fallback(
     logs_client: &LogsClient,
@@ -581,67 +555,6 @@ async fn fetch_logs_with_fallback(
         .list_entries(Some(&filter), 50)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// Convert relative time patterns to RFC3339 timestamps.
-///
-/// Handles patterns like:
-/// - "-2h" -> actual timestamp 2 hours ago
-/// - "-1d" -> actual timestamp 1 day ago
-/// - "-30m" -> actual timestamp 30 minutes ago
-fn fix_relative_timestamps(query: &str) -> String {
-    use chrono::{Duration, Utc};
-
-    let mut result = query.to_string();
-
-    // Pattern: timestamp>="-Xh" or timestamp>="-Xd" or timestamp>="-Xm"
-    // Match quoted relative times
-    let patterns = [
-        (r#""-(\d+)h""#, "hours"),
-        (r#""-(\d+)d""#, "days"),
-        (r#""-(\d+)m""#, "minutes"),
-        (r#""-(\d+)s""#, "seconds"),
-    ];
-
-    for (pattern, unit) in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            let replacements: Vec<(String, String)> = re
-                .captures_iter(&result.clone())  // Clone to avoid borrow conflict
-                .filter_map(|captures| {
-                    let num_match = captures.get(1)?;
-                    let num: i64 = num_match.as_str().parse().ok()?;
-
-                    let duration = match unit {
-                        "hours" => Duration::hours(num),
-                        "days" => Duration::days(num),
-                        "minutes" => Duration::minutes(num),
-                        "seconds" => Duration::seconds(num),
-                        _ => return None,
-                    };
-
-                    let timestamp = Utc::now() - duration;
-                    let rfc3339 = timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-                    let old_value = captures.get(0)?.as_str().to_string();
-                    let new_value = format!("\"{}\"", rfc3339);
-
-                    Some((old_value, new_value))
-                })
-                .collect();
-
-            // Now apply replacements
-            for (old_value, new_value) in replacements {
-                debug!(
-                    old = %old_value,
-                    new = %new_value,
-                    "Converted relative timestamp"
-                );
-                result = result.replace(&old_value, &new_value);
-            }
-        }
-    }
-
-    result
 }
 
 // ============================================================================

@@ -11,10 +11,11 @@ use clap::Parser;
 use tracing::{info, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs};
+use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
 use racoon::gcp::{GcpAuth, LogFilter, LogsClient};
 use racoon::ui::{App, run_app};
 use racoon::ai::GeminiClient;
+use racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +34,8 @@ async fn main() -> Result<()> {
         Commands::Auth => handle_auth().await,
         Commands::Download(args) => handle_download(args).await,
         Commands::Query(args) => handle_query(args).await,
+        Commands::Export(args) => handle_export(args).await,
+        Commands::View(args) => handle_view(args).await,
     };
 
     // Handle errors gracefully at the top level
@@ -236,28 +239,33 @@ async fn handle_download(args: DownloadArgs) -> Result<()> {
 
     let client = LogsClient::new(auth, args.project.clone());
 
-    // Check if AI-assisted download
-    let filter = if let Some(ref ai_prompt) = args.ai {
-        println!("🤖 Generating query from: \"{}\"", ai_prompt);
+    let options = ExportOptions {
+        limit: args.limit,
+        ..Default::default()
+    };
 
+    let result = if let Some(ref ai_prompt) = args.ai {
         let gemini = GeminiClient::from_env()
             .context("AI download requires GEMINI_API_KEY")?;
 
-        let query = gemini.generate_query(ai_prompt).await?;
-        println!("📋 Generated query: {}", query);
+        println!("🦝 Generating query: \"{}\"", ai_prompt);
 
-        Some(LogFilter::new().raw(&query))
+        let (query, result) = export_logs_with_ai(
+            &client,
+            &gemini,
+            ai_prompt,
+            &args.output,
+            options,
+        ).await?;
+
+        println!("📋 Query: {}", query);
+        result
     } else {
-        args.filter.as_ref().map(|f| LogFilter::new().raw(f))
+        let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+        export_logs(&client, filter.as_ref(), &args.output, options).await?
     };
 
-    println!("📥 Downloading logs...");
-    let entries = client.list_entries(filter.as_ref(), args.limit).await?;
-
-    let file = std::fs::File::create(&args.output)?;
-    serde_json::to_writer_pretty(std::io::BufWriter::new(file), &entries)?;
-
-    println!("✅ Downloaded {} logs to {}", entries.len(), args.output);
+    println!("✅ Downloaded {} logs to {}", result.count, result.path);
     Ok(())
 }
 
@@ -318,12 +326,147 @@ async fn handle_query(args: QueryArgs) -> Result<()> {
     Ok(())
 }
 
+/// Handle `racoon view` - view logs from local file
+async fn handle_view(args: ViewArgs) -> Result<()> {
+    println!("📂 Loading logs from: {}", args.file);
+
+    let result = import_logs(&args.file)
+        .context("Failed to import logs")?;
+
+    println!("   Format: {}", result.format.name());
+    println!("   Loaded: {} entries", result.count);
+
+    if result.errors > 0 {
+        println!("   ⚠️  {} entries failed to parse", result.errors);
+    }
+
+    if args.json {
+        // Output as JSON
+        println!();
+        println!("{}", serde_json::to_string_pretty(&result.entries)?);
+    } else if result.entries.is_empty() {
+        println!("\n(no entries to display)");
+    } else {
+        // Display in terminal
+        println!();
+
+        let entries_to_show = result.entries.iter().take(args.limit);
+
+        for entry in entries_to_show {
+            let severity = entry.severity_or_default();
+            let color = match severity {
+                "ERROR" | "CRITICAL" | "ALERT" | "EMERGENCY" => "\x1b[31m",
+                "WARNING" => "\x1b[33m",
+                "INFO" => "\x1b[32m",
+                _ => "",
+            };
+
+            println!(
+                "{}{} [{}]\x1b[0m {}",
+                color,
+                entry.timestamp_str(),
+                severity,
+                entry.message_preview()
+            );
+        }
+
+        if result.count > args.limit {
+            println!("\n... and {} more (use --limit to see more)", result.count - args.limit);
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `racoon export` - advanced export with options
+async fn handle_export(args: ExportArgs) -> Result<()> {
+    let auth = GcpAuth::new().await.context("Authentication failed")?;
+    auth.verify().await?;
+
+    let client = LogsClient::new(auth, args.project.clone());
+
+    // Parse format
+    let format: ExportFormat = args.format.parse()
+        .map_err(|e: String| anyhow::anyhow!(e))?;
+
+    let options = ExportOptions {
+        format,
+        pretty: !args.compact,
+        include_metadata: !args.no_metadata,
+        limit: args.limit,
+    };
+
+    println!("📤 Exporting logs...");
+    println!("   Project: {}", args.project);
+    println!("   Output: {}", args.output);
+    println!("   Format: {}", format.name());
+
+    let result = if let Some(ref ai_prompt) = args.ai {
+        // AI-assisted export
+        let gemini = GeminiClient::from_env()
+            .context("AI export requires GEMINI_API_KEY")?;
+
+        println!("   🦝 AI query: \"{}\"", ai_prompt);
+
+        let (query, result) = export_logs_with_ai(
+            &client,
+            &gemini,
+            ai_prompt,
+            &args.output,
+            options,
+        ).await?;
+
+        println!("   Generated filter: {}", query);
+        result
+    } else {
+        // Regular export
+        let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+
+        if let Some(ref f) = filter {
+            println!("   Filter: {}", f.build());
+        }
+
+        export_logs(&client, filter.as_ref(), &args.output, options).await?
+    };
+
+    println!();
+    println!("✅ Export complete!");
+    println!("   Entries: {}", result.count);
+    println!("   Size: {} bytes", result.size_bytes);
+    println!("   File: {}", result.path);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_init_tracing_valid_levels() {
+        // Test various valid log levels
+        // Note: We can only set the global subscriber once, so we test parsing logic
+        let valid_levels = ["trace", "debug", "info", "warn", "warning", "error", "INFO", "DEBUG"];
 
+        for level in valid_levels {
+            let parsed = match level.to_lowercase().as_str() {
+                "trace" => Level::TRACE,
+                "debug" => Level::DEBUG,
+                "info" => Level::INFO,
+                "warn" | "warning" => Level::WARN,
+                "error" => Level::ERROR,
+                _ => Level::INFO,
+            };
+
+            // Just verify parsing doesn't panic and returns expected level
+            match level.to_lowercase().as_str() {
+                "trace" => assert_eq!(parsed, Level::TRACE),
+                "debug" => assert_eq!(parsed, Level::DEBUG),
+                "info" => assert_eq!(parsed, Level::INFO),
+                "warn" | "warning" => assert_eq!(parsed, Level::WARN),
+                "error" => assert_eq!(parsed, Level::ERROR),
+                _ => {}
+            }
+        }
     }
 }

@@ -106,6 +106,11 @@ impl LogsClient {
             project,
         }
     }
+    
+    /// Get the project ID this client is configured for.
+    pub fn project(&self) -> &str {
+        &self.project
+    }
 
     /// Query log entries from Cloud Logging.
     ///
