@@ -10,9 +10,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{info, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use colored::Colorize;
 
 use racoon::cli::{Cli, Commands, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
-use racoon::gcp::{GcpAuth, LogFilter, LogsClient};
+use racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
 use racoon::ui::{App, run_app};
 use racoon::ai::GeminiClient;
 use racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
@@ -143,26 +144,31 @@ async fn handle_tail(args: TailArgs) -> Result<()> {
 
 /// handle projects command
 async fn handle_projects() -> Result<()> {
-    info!("Listing accessible GCP projects");
+    println!("{}", "Fetching GCP projects...".dimmed());
 
-    // Initialize and verify authentication first
-    let auth = GcpAuth::new()
-        .await
-        .context("Failed to initialize GCP authentication")?;
+    let auth = GcpAuth::new().await.context("Authentication failed")?;
+    auth.verify().await.context("GCP credentials verification failed")?;
 
-    auth.verify()
-        .await
-        .context("Failed to verify GCP authentication")?;
+    let client = ProjectsClient::new(auth);
 
-    println!("✅ Authentication successful!");
-    println!("   {}", auth.credential_info());
-    println!();
+    let projects = client.list().await?;
 
-    // TODO:
-    // 2. call api
+    if projects.is_empty() {
+        println!("{}", "No accessible projects found.".yellow());
+        return Ok(());
+    }
 
-    println!("🚧 Project listing not yet implemented");
-    println!("   This will list all GCP projects you have access to.");
+    println!("\n{}", format!("Found {} projects:", projects.len()).green().bold());
+    println!("{}", "─".repeat(60));
+    println!("{:<40} {:<20}", "PROJECT ID".bold(), "NAME".bold());
+    println!("{}", "─".repeat(60));
+
+    for project in &projects {
+        println!("{:<40} {:<20}", project.project_id, project.display_name());
+    }
+
+    println!("{}", "─".repeat(60));
+    println!("\nUse {} to stream logs", "racoon tail --project <PROJECT_ID>".cyan());
 
     Ok(())
 }
