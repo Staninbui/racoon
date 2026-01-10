@@ -58,6 +58,15 @@ pub struct App {
 
     /// Scroll offset for the AI pane.
     pub ai_scroll: u16,
+
+    /// Current search query.
+    pub search_query: Option<String>,
+
+    /// Indices of logs matching the search.
+    pub search_matches: Vec<usize>,
+
+    /// Current match index (for next/prev navigation).
+    pub search_match_index: usize,
 }
 
 impl App {
@@ -84,6 +93,9 @@ impl App {
             error_message: None,
             detail_scroll: 0,
             ai_scroll: 0,
+            search_query: None,
+            search_matches: Vec::new(),
+            search_match_index: 0,
         }
     }
 
@@ -229,6 +241,89 @@ impl App {
     /// Clear the current error message.
     pub fn clear_error(&mut self) {
         self.error_message = None;
+    }
+
+    /// Perform a local search within loaded logs.
+    pub fn search(&mut self, query: &str) {
+        if query.is_empty() {
+            self.clear_search();
+            return;
+        }
+
+        let query_lower = query.to_lowercase();
+
+        // Find all matching log indices
+        self.search_matches = self.logs
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                // Search in message
+                let message = entry.message_preview().to_lowercase();
+                if message.contains(&query_lower) {
+                    return true;
+                }
+
+                // Search in severity
+                let severity = entry.severity_or_default().to_lowercase();
+                if severity.contains(&query_lower) {
+                    return true;
+                }
+
+                // Search in full JSON (expensive but thorough)
+                if let Ok(json) = serde_json::to_string(entry) {
+                    if json.to_lowercase().contains(&query_lower) {
+                        return true;
+                    }
+                }
+
+                false
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        self.search_query = Some(query.to_string());
+        self.search_match_index = 0;
+
+        // Jump to first match
+        if let Some(&first_match) = self.search_matches.first() {
+            self.selected_index = first_match;
+        }
+    }
+
+    /// Jump to next search match.
+    pub fn search_next(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+
+        self.search_match_index = (self.search_match_index + 1) % self.search_matches.len();
+        self.selected_index = self.search_matches[self.search_match_index];
+    }
+
+    /// Jump to previous search match.
+    pub fn search_prev(&mut self) {
+        if self.search_matches.is_empty() {
+            return;
+        }
+
+        if self.search_match_index == 0 {
+            self.search_match_index = self.search_matches.len() - 1;
+        } else {
+            self.search_match_index -= 1;
+        }
+        self.selected_index = self.search_matches[self.search_match_index];
+    }
+
+    /// Clear search state.
+    pub fn clear_search(&mut self) {
+        self.search_query = None;
+        self.search_matches.clear();
+        self.search_match_index = 0;
+    }
+
+    /// Check if a log index matches the current search.
+    pub fn is_search_match(&self, index: usize) -> bool {
+        self.search_matches.contains(&index)
     }
 }
 

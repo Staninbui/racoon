@@ -24,7 +24,17 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             let line = format!("{} [{}] {}", timestamp, severity, message);
 
             // Color based on severity
-            let style = severity_style(severity);
+            let mut style = severity_style(severity);
+
+            // Highlight search matches with a different background
+            if app.is_search_match(i) {
+                style = style.bg(Color::DarkGray);
+            }
+
+            // Highlight selected item
+            if i == app.selected_index {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
 
             // Highlight selected item differently
             let style = if i == app.selected_index {
@@ -37,6 +47,19 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    // Update title to show search status
+    let title = if let Some(ref query) = app.search_query {
+        format!(
+            " Logs ({}) - Search: '{}' [{}/{}] ",
+            logs.len(),
+            query,
+            if app.search_matches.is_empty() { 0 } else { app.search_match_index + 1 },
+            app.search_matches.len()
+        )
+    } else {
+        format!(" Logs ({}) ", logs.len())
+    };
+
     // Calculate scroll offset to keep selection centered in view
     let visible_height = area.height.saturating_sub(2) as usize; // -2 for borders
     let offset = app.selected_index.saturating_sub(visible_height / 2);
@@ -44,7 +67,7 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" Logs ({}) ", logs.len()))
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Blue))
         )

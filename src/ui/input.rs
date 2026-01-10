@@ -64,6 +64,20 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Search navigation (vim style)
+        KeyCode::Char('n') => {
+            if app.search_query.is_some() {
+                app.search_next();
+            }
+            Action::None
+        }
+        KeyCode::Char('N') => {
+            if app.search_query.is_some() {
+                app.search_prev();
+            }
+            Action::None
+        }
+
         // Navigation
         KeyCode::Char('j') | KeyCode::Down => {
             app.select_next();
@@ -136,6 +150,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
 
         // Clear
         KeyCode::Esc => {
+            app.clear_search();
             app.clear_ai_response();
             app.filter = None;
             Action::None
@@ -172,8 +187,19 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
                     Action::AskQuestion(text)
                 }
                 InputMode::Search => {
-                    // TODO: Implement local search
-                    app.set_error("Search not yet implemented".to_string());
+                    // Perform local search
+                    app.search(&text);
+                    let match_count = app.search_matches.len();
+                    if match_count == 0 {
+                        app.set_error(format!("No matches for '{}'", text));
+                    } else {
+                        // Show match count (optional: use a status message instead of error)
+                        app.set_error(format!(
+                            "Found {} match{} (n: next, N: prev, Esc: clear)",
+                            match_count,
+                            if match_count == 1 { "" } else { "es" }
+                        ));
+                    }
                     Action::None
                 }
                 InputMode::Normal => Action::None,
