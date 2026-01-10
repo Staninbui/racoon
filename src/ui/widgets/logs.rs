@@ -44,7 +44,7 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     // Update title to show search status
     let title = if let Some(ref query) = app.search_query {
         format!(
-            " Logs ({}) - Search: '{}' [{}/{}] ",
+            " Logs ({}) - Search: '{}' [{}/{}], n/N: next/prev, Esc: clear",
             logs.len(),
             query,
             if app.search_matches.is_empty() { 0 } else { app.search_match_index + 1 },

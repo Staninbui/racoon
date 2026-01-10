@@ -195,16 +195,8 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
                 InputMode::Search => {
                     // Perform local search
                     app.search(&text);
-                    let match_count = app.search_matches.len();
-                    if match_count == 0 {
+                    if app.search_matches.is_empty() {
                         app.set_error(format!("No matches for '{}'", text));
-                    } else {
-                        // Show match count (optional: use a status message instead of error)
-                        app.set_error(format!(
-                            "Found {} match{} (n: next, N: prev, Esc: clear)",
-                            match_count,
-                            if match_count == 1 { "" } else { "es" }
-                        ));
                     }
                     Action::None
                 }
