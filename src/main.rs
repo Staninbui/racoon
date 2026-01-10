@@ -12,13 +12,13 @@ use tracing::{info, error, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use colored::Colorize;
 
-use racoon::cli::{Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
-use racoon::config::Config;
-use racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
-use racoon::ui::{App, run_app};
-use racoon::ai::GeminiClient;
-use racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
-use racoon::ui::theme::Theme;
+use gcp_racoon::cli::{Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, QueryArgs, TailArgs, ViewArgs, ExportArgs};
+use gcp_racoon::config::Config;
+use gcp_racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
+use gcp_racoon::ui::{App, run_app};
+use gcp_racoon::ai::GeminiClient;
+use gcp_racoon::storage::{export_logs, export_logs_with_ai, import_logs, ExportFormat, ExportOptions};
+use gcp_racoon::ui::theme::Theme;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -99,7 +99,7 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     let since_str = args.since.as_deref()
         .unwrap_or(&config.defaults.since);
 
-    let duration = racoon::parse_duration_chrono(since_str)
+    let duration = gcp_racoon::parse_duration_chrono(since_str)
         .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
     let auth = GcpAuth::new()
