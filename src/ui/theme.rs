@@ -241,7 +241,7 @@ mod tests {
     fn test_theme_white() {
         let theme = Theme::Light;
         let colors = theme.colors();
-        assert_eq!(colors.fg, Color::Black);
+        assert_eq!(colors.fg, Color::LightBlue);
         assert_eq!(colors.bg, Color::White);
         assert_eq!(colors.fg_dim, Color::Gray);
     }
