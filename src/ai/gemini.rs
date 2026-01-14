@@ -299,7 +299,7 @@ Response:"#,
         question: &str,
         logs_client: &LogsClient,
     ) -> Result<QuestionAnswer, AiError> {
-        tracing::info!(question = question, "Processing AI question");
+        debug!(question = %question, "Processing AI question");
 
         // Step 1: Generate a query from the question
         let raw_query = self.generate_query(question).await?;

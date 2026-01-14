@@ -76,9 +76,9 @@ impl Theme {
 fn dark_theme() -> ThemeColors {
     ThemeColors {
         // Base
-        fg: Color::White,
+        fg: Color::Rgb(220, 220, 220), // Bright white for better visibility
         bg: Color::Reset,
-        fg_dim: Color::DarkGray,
+        fg_dim: Color::Rgb(140, 140, 140), // Brighter gray for better contrast on dark terminals
 
         // UI elements
         border: Color::DarkGray,
@@ -117,7 +117,7 @@ fn dark_theme() -> ThemeColors {
 fn light_theme() -> ThemeColors {
     ThemeColors {
         // Base
-        fg: Color::Black,
+        fg: Color::LightBlue,
         bg: Color::White,
         fg_dim: Color::Gray,
 
@@ -232,9 +232,9 @@ mod tests {
     fn test_theme_dark() {
         let theme = Theme::Dark;
         let colors = theme.colors();
-        assert_eq!(colors.fg, Color::White);
+        assert_eq!(colors.fg, Color::Rgb(220, 220, 220));
         assert_eq!(colors.bg, Color::Reset);
-        assert_eq!(colors.fg_dim, Color::DarkGray);
+        assert_eq!(colors.fg_dim, Color::Rgb(140, 140, 140));
     }
 
     #[test]

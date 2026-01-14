@@ -233,9 +233,13 @@ async fn run_event_loop(
             }
         }
 
-        // 3. Check for new logs
+        // 3. Check for new logs (only add if streaming is enabled)
         while let Ok(entry) = log_rx.try_recv() {
-            app.add_log(entry);
+            if app.is_streaming {
+                app.add_log(entry);
+            }
+            // When paused, we still drain the channel to prevent backpressure,
+            // but we don't add the logs to the UI
         }
 
         // 4. Check for AI responses
