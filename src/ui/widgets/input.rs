@@ -21,7 +21,6 @@ pub fn render_input_bar(frame: &mut Frame, app: &App, area: Rect) {
 fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     let colors = app.colors();
     let hints = if let Some(ref error) = app.error_message {
-        // Show error in red
         Paragraph::new(format!("❌ {}", error))
             .style(colors.error_style())
             .block(
@@ -29,10 +28,21 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(colors.error_style()),
             )
-    } else if let Some(ref filter) = app.filter {
-        // Show current filter
+    } else if let Some(ref trace_id) = app.active_trace {
+        let filter_str = app.filter.as_deref().unwrap_or("");
         Paragraph::new(format!(
-            "Filter: {} │ Press 'f' to change, Esc to clear",
+            "🔗 Trace Mode ({}) │ Filter: {}\nx/Esc: Exit Trace & Restore Stream │ E: Full-Trace AI Root Cause Analysis │ e: Explain Log",
+            trace_id, filter_str
+        ))
+        .style(Style::default().fg(Color::Cyan))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+    } else if let Some(ref filter) = app.filter {
+        Paragraph::new(format!(
+            "Filter: {} │ Press 'f' to change, 'x' to trace request, 'E' for AI RCA, Esc to clear",
             filter
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -42,10 +52,9 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 .border_style(Style::default().fg(Color::Cyan)),
         )
     } else {
-        // Show keyboard hints
         let hints_text = "\
-j/k: Navigate │ e: AI Explain │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ p: Pause │ t: Theme │ q: Quit
-g/HOME: First │ G/END: Last   │ PgDown: +10 │ PgUp: -10 │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI";
+j/k: Nav │ x: Trace │ e: Explain │ E: Trace RCA │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ p: Pause │ q: Quit
+g/G: First/Last │ PgUp/PgDn: ±10 │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()
                 .borders(Borders::ALL)
@@ -61,7 +70,6 @@ fn render_input_field(frame: &mut Frame, app: &App, area: Rect) {
     let prompt = app.input_mode.prompt();
     let input = &app.input_buffer;
 
-    // Show cursor with a block character
     let display_text = format!("{}{}_", prompt, input);
 
     let (title, border_color) = match app.input_mode {

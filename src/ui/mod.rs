@@ -2,28 +2,7 @@
 //!
 //! This module provides a real-time TUI for viewing and analyzing GCP logs.
 //! Built with ratatui and crossterm.
-//!
-//! # Architecture
-//!
-//! - `App`: Application state (logs, selection, input mode)
-//! - `input`: Keyboard input handling
-//! - `widgets`: Reusable UI components (log list, detail pane, input bar)
-//!
-//! # Usage
-//!
-//! ```rust,ignore
-//! use gcp_racoon::ui::{App, run_app};
-//! use gcp_racoon::gcp::LogEntry;
-//! use tokio::sync::mpsc;
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let (tx, rx) = mpsc::channel::<LogEntry>(256);
-//!     let app = App::new("my-project".to_string());
-//!     run_app(app, rx, None, None).await?;
-//!     Ok(())
-//! }
-//! ```
+
 pub mod app;
 pub mod input;
 pub mod theme;
@@ -53,6 +32,11 @@ type Term = Terminal<CrosstermBackend<io::Stdout>>;
 pub enum AiRequest {
     /// Explain a single log entry.
     ExplainLog(Box<LogEntry>),
+    /// Perform Full-Trace / Multi-Log Root Cause Analysis (`E` key).
+    AnalyzeTrace {
+        filter_clause: Option<String>,
+        local_logs: Vec<LogEntry>,
+    },
     /// Ask a question and get an analyzed answer (includes current buffered logs for offline fallback).
     AskQuestion {
         question: String,
@@ -65,7 +49,7 @@ pub enum AiRequest {
 /// AI response from the background worker.
 #[derive(Debug)]
 pub enum AiResponse {
-    /// Explanation of a log entry.
+    /// Explanation of a log entry or multi-log trace analysis.
     Explanation(String),
     /// Answer to a question.
     QuestionAnswer {
@@ -80,27 +64,12 @@ pub enum AiResponse {
 }
 
 /// Run the TUI application.
-///
-/// This is the main entry point for the TUI. It initializes the terminal,
-/// runs the event loop, and restores the terminal on exit.
-///
-/// # Arguments
-///
-/// * `app` - The application state
-/// * `log_rx` - Channel receiver for incoming log entries
-/// * `gemini` - Optional AI client
-/// * `logs_client` - Optional GCP Logs client (present in live `tail` mode, `None` in offline `view` mode)
-///
-/// # Returns
-///
-/// Returns `Ok(())` when the user quits, or an error if something goes wrong.
 pub async fn run_app(
     mut app: App,
     mut log_rx: mpsc::Receiver<LogEntry>,
     gemini: Option<GeminiClient>,
     logs_client: Option<LogsClient>,
 ) -> Result<()> {
-    // Create AI communication channels
     let (ai_tx, mut ai_rx) = mpsc::channel::<AiResponse>(16);
     let (ai_request_tx, mut ai_request_rx) = mpsc::channel::<AiRequest>(16);
 
@@ -109,7 +78,6 @@ pub async fn run_app(
         app.ai_model_label = format!("{}/{}", c.provider().id(), c.model());
     }
 
-    // Spawn AI worker task (supports hot-swapping client via AiRequest::UpdateClient)
     let ai_tx_clone = ai_tx.clone();
     let worker_logs_client = logs_client.clone();
     let mut current_client = gemini;
@@ -125,6 +93,64 @@ pub async fn run_app(
                         match client.explain_log(&entry).await {
                             Ok(text) => AiResponse::Explanation(text),
                             Err(e) => AiResponse::Error(e.to_string()),
+                        }
+                    } else {
+                        AiResponse::Error(
+                            "AI client not configured. Press 'm' to select a provider/model."
+                                .to_string(),
+                        )
+                    };
+                    if ai_tx_clone.send(result).await.is_err() {
+                        break;
+                    }
+                }
+                AiRequest::AnalyzeTrace {
+                    filter_clause,
+                    local_logs,
+                } => {
+                    let result = if let Some(ref client) = current_client {
+                        // Fetch full trace logs from GCP if live client and trace filter are available
+                        let mut trace_entries = if let (Some(lc), Some(expr)) =
+                            (&worker_logs_client, filter_clause.as_deref())
+                        {
+                            let gcp_filter = LogFilter::new()
+                                .since(chrono::Duration::hours(24))
+                                .raw(expr);
+                            match lc.list_entries(Some(&gcp_filter), 30).await {
+                                Ok(mut fetched) if !fetched.is_empty() => {
+                                    // `list_entries` returns newest first; reverse for chronological timeline
+                                    fetched.reverse();
+                                    fetched
+                                }
+                                _ => local_logs,
+                            }
+                        } else {
+                            local_logs
+                        };
+
+                        if trace_entries.is_empty() {
+                            AiResponse::Error("No logs found for trace analysis.".to_string())
+                        } else {
+                            // Keep up to 15 most relevant chronological entries
+                            if trace_entries.len() > 15 {
+                                trace_entries = trace_entries.into_iter().take(15).collect();
+                            }
+                            let count = trace_entries.len();
+                            let header = match filter_clause {
+                                Some(ref f) => {
+                                    format!("🔗 Full-Trace RCA ({} logs │ {})\n\n", count, f)
+                                }
+                                None => format!(
+                                    "🔗 Multi-Log Root Cause Analysis ({} logs)\n\n",
+                                    count
+                                ),
+                            };
+                            match client.analyze_logs(&trace_entries).await {
+                                Ok(analysis) => {
+                                    AiResponse::Explanation(format!("{}{}", header, analysis))
+                                }
+                                Err(e) => AiResponse::Error(e.to_string()),
+                            }
                         }
                     } else {
                         AiResponse::Error(
@@ -203,11 +229,9 @@ pub async fn run_app(
         }
     });
 
-    // Initialize terminal
     let mut terminal = ratatui::init();
     terminal.clear()?;
 
-    // Main event loop
     let result = run_event_loop(
         &mut terminal,
         &mut app,
@@ -218,7 +242,6 @@ pub async fn run_app(
     )
     .await;
 
-    // Restore terminal (always, even on error)
     ratatui::restore();
 
     result
@@ -231,7 +254,11 @@ async fn restart_live_stream(
     logs_client: &LogsClient,
     filter_expr: Option<&str>,
 ) {
-    let lookback = chrono::Duration::hours(1);
+    let lookback = if app.active_trace.is_some() {
+        chrono::Duration::hours(24)
+    } else {
+        chrono::Duration::hours(1)
+    };
     let mut gcp_filter = LogFilter::new().since(lookback);
     if let Some(expr) = filter_expr
         && !expr.trim().is_empty()
@@ -260,21 +287,17 @@ async fn run_event_loop(
     logs_client: Option<&LogsClient>,
 ) -> Result<()> {
     loop {
-        // 1. Draw UI
         terminal.draw(|frame| {
             render_ui(frame, app);
         })?;
 
-        // 2. Handle events (non-blocking with timeout)
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
         {
-            // Handle Ctrl+C globally
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 app.should_quit = true;
             }
 
-            // Delegate to event handler
             let action = input::handle_key_event(app, key);
 
             match action {
@@ -330,6 +353,29 @@ async fn run_event_loop(
                         let _ = tx.send(AiRequest::ExplainLog(Box::new(entry))).await;
                     }
                 }
+                input::Action::AnalyzeTrace => {
+                    if let Some(tx) = ai_tx {
+                        let filter_clause = if app.active_trace.is_some() {
+                            app.filter.clone()
+                        } else {
+                            app.selected_log()
+                                .and_then(|e| e.correlation_id())
+                                .map(|(clause, _)| clause)
+                        };
+                        app.start_ai_loading();
+                        app.ai_query = Some(
+                            filter_clause
+                                .clone()
+                                .unwrap_or_else(|| "Full-Trace Root Cause Analysis".to_string()),
+                        );
+                        let _ = tx
+                            .send(AiRequest::AnalyzeTrace {
+                                filter_clause,
+                                local_logs: app.logs.clone(),
+                            })
+                            .await;
+                    }
+                }
                 input::Action::AskQuestion(question) => {
                     if let Some(tx) = ai_tx {
                         app.start_ai_loading();
@@ -346,23 +392,20 @@ async fn run_event_loop(
             }
         }
 
-        // 3. Check for new logs (only add if streaming is enabled)
         while let Ok(entry) = log_rx.try_recv() {
             if app.is_streaming {
                 app.add_log(entry);
             }
-            // When paused, we still drain the channel to prevent backpressure,
-            // but we don't add the logs to the UI
         }
 
-        // 4. Check for AI responses
         while let Ok(response) = ai_rx.try_recv() {
             match response {
                 AiResponse::Explanation(text) => {
                     app.set_ai_response(text);
                 }
                 AiResponse::FilterSet { filter, message } => {
-                    // Set the filter, update local/live stream, and show confirmation
+                    app.active_trace = None;
+                    app.previous_filter = None;
                     app.set_filter(Some(filter.clone()));
                     if let Some(lc) = logs_client {
                         restart_live_stream(app, log_rx, lc, Some(&filter)).await;
@@ -374,7 +417,6 @@ async fn run_event_loop(
                     log_count,
                     answer,
                 } => {
-                    // Format the full response
                     let formatted = format!(
                         "📊 Query: {}\n📋 Found: {} logs\n\n{}",
                         query, log_count, answer
@@ -388,7 +430,6 @@ async fn run_event_loop(
             }
         }
 
-        // 5. Check if we should quit
         if app.should_quit {
             break;
         }
@@ -401,39 +442,26 @@ async fn run_event_loop(
 fn render_ui(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Main layout: header, logs, detail, footer
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Length(12), // Logs (10 rows)
-            Constraint::Min(10),    // Body
-            Constraint::Length(4),  // Footer (input bar)
+            Constraint::Length(3),
+            Constraint::Length(12),
+            Constraint::Min(10),
+            Constraint::Length(4),
         ])
         .split(area);
 
-    // Render header
     render_header(frame, app, main_chunks[0]);
-
-    // Render log list
     render_log_list(frame, app, main_chunks[1]);
 
-    // Body layout: AI response (left) + detail pane (right)
     let detail_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50), // AI response
-            Constraint::Percentage(50), // Detail pane
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(main_chunks[2]);
 
-    // Render AI pane
     render_ai_pane(frame, app, detail_chunks[0]);
-
-    // Render detail pane
     render_detail_pane(frame, app, detail_chunks[1]);
-
-    // Render input bar
     render_input_bar(frame, app, main_chunks[3]);
 }
 

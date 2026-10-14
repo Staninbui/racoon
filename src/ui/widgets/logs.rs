@@ -1,6 +1,7 @@
 //! Log list widget.
 //!
-//! Displays a scrollable list of log entries with severity-based coloring.
+//! Displays a scrollable list of log entries with severity-based coloring
+//! and distributed trace badges.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
@@ -12,7 +13,7 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     let logs = &app.logs;
     let colors = app.colors();
 
-    // Convert logs to list items with coloring
+    // Convert logs to list items with coloring and optional trace badge
     let items: Vec<ListItem> = logs
         .iter()
         .enumerate()
@@ -21,18 +22,18 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             let timestamp = entry.timestamp_str();
             let message = entry.message_preview();
 
-            // Format the line
-            let line = format!("{} [{}] {}", timestamp, severity, message);
+            let line = if let Some(badge) = entry.short_trace_badge() {
+                format!("{} [{}] [{}] {}", timestamp, severity, badge, message)
+            } else {
+                format!("{} [{}] {}", timestamp, severity, message)
+            };
 
-            // Color based on severity
             let mut style = colors.severity_style(severity);
 
-            // Highlight search matches with a different background
             if app.is_search_match(i) {
                 style = style.bg(colors.search_match_bg);
             }
 
-            // Highlight selected item
             if i == app.selected_index {
                 style = colors.selection_style();
             }
@@ -41,10 +42,16 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Update title to show search status
-    let title = if let Some(ref query) = app.search_query {
+    // Update title to show Trace Context mode or search status
+    let title = if let Some(ref trace_id) = app.active_trace {
         format!(
-            " Logs ({}) - Search: '{}' [{}/{}], n/N: next/prev, Esc: clear",
+            " 🔗 Trace Context: {} ({} logs) — x/Esc: exit, E: Full-Trace AI RCA ",
+            trace_id,
+            logs.len()
+        )
+    } else if let Some(ref query) = app.search_query {
+        format!(
+            " Logs ({}) - Search: '{}' [{}/{}], n/N: next/prev, Esc: clear ",
             logs.len(),
             query,
             if app.search_matches.is_empty() {
@@ -58,23 +65,27 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         format!(" Logs ({}) ", logs.len())
     };
 
-    // Calculate scroll offset to keep selection centered in view
-    let visible_height = area.height.saturating_sub(2) as usize; // -2 for borders
+    let visible_height = area.height.saturating_sub(2) as usize;
     let offset = app.selected_index.saturating_sub(visible_height / 2);
+
+    let border_style = if app.active_trace.is_some() {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        colors.border_focused_style()
+    };
 
     let list = List::new(items)
         .block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
-                .border_style(colors.border_focused_style()),
+                .border_style(border_style),
         )
         .highlight_style(colors.selection_style());
 
-    // Create list state with selection and scroll offset
     let mut state = ListState::default();
     state.select(Some(app.selected_index));
-    *state.offset_mut() = offset; // Keep selection centered
+    *state.offset_mut() = offset;
 
     frame.render_stateful_widget(list, area, &mut state);
 }

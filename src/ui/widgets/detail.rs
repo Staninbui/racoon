@@ -1,7 +1,7 @@
 //! Log detail and AI response widget.
 //!
-//! Displays the full JSON of the selected log entry, and AI analysis
-//! when available.
+//! Displays the full JSON of the selected log entry (with trace/span metadata),
+//! and AI analysis when available.
 
 use ratatui::prelude::*;
 use ratatui::widgets::Scrollbar;
@@ -9,12 +9,26 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ui::App;
 
-/// Render the log detail pane (JSON view only).
+/// Render the log detail pane (trace summary + JSON view).
 pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
     let colors = app.colors();
     let content = if let Some(entry) = app.selected_log() {
-        // Pretty-print the log entry as JSON
-        serde_json::to_string_pretty(entry).unwrap_or_else(|_| "[Failed to serialize]".to_string())
+        let json = serde_json::to_string_pretty(entry)
+            .unwrap_or_else(|_| "[Failed to serialize]".to_string());
+
+        if let Some((filter_clause, _)) = entry.correlation_id() {
+            let span_info = entry
+                .span_id
+                .as_deref()
+                .map(|s| format!(" │ Span: {}", s))
+                .unwrap_or_default();
+            format!(
+                "🔗 {}{}  [x: Toggle Trace | E: Trace AI RCA]\n────────────────────────────────────────────────────\n{}",
+                filter_clause, span_info, json
+            )
+        } else {
+            json
+        }
     } else {
         "No log selected".to_string()
     };
@@ -70,12 +84,10 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         let help = [
             "Press 'e' to explain selected log",
-            "Press '?' to ask a question about your logs",
-            "",
-            "Example questions:",
-            "  • Are there any errors today?",
-            "  • 最近有发生过严重报错吗?",
-            "  • What caused the timeout at 14:00?",
+            "Press 'x' to isolate full request trace across services",
+            "Press 'E' (Shift+e) for Full-Trace / Multi-Log AI Root Cause Analysis",
+            "Press '?' to ask a natural-language question about your logs",
+            "Press 'm' to switch AI Provider & Model interactively",
         ]
         .join("\n");
         (help, colors.dim_style())
@@ -85,7 +97,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         .style(style)
         .block(
             Block::default()
-                .title(" AI Analysis, Ctrl+n/p to scroll")
+                .title(" AI Analysis (Ctrl+n/p to scroll) ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(colors.ai_border)),
         )

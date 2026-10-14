@@ -6,28 +6,6 @@
 //! # API Reference
 //!
 //! - [entries.list](https://cloud.google.com/logging/docs/reference/v2/rest/v2/entries/list)
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use gcp_racoon::gcp::{GcpAuth, LogsClient, LogFilter};
-//!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     let auth = GcpAuth::new().await?;
-//!     let client = LogsClient::new(auth, "my-project".to_string());
-//!
-//!     // Query logs
-//!     let filter = LogFilter::new().severity_min("ERROR");
-//!     let entries = client.list_entries(Some(&filter), 50).await?;
-//!
-//!     for entry in entries {
-//!         println!("{}: {}", entry.severity_or_default(), entry.message_preview());
-//!     }
-//!
-//!     Ok(())
-//! }
-//! ```
 
 use super::auth::GcpAuth;
 use chrono::{DateTime, Duration, Utc};
@@ -76,26 +54,18 @@ pub enum LogsError {
 }
 
 /// Client for interacting with GCP logging API.
-///
-/// Provides methods to query logs, stream logs in real-time(via polling),
-/// and manage log filters.
 #[derive(Clone)]
 pub struct LogsClient {
     /// Http client for API requests.
     http: Client,
-    /// GCP authentication manager,
+    /// GCP authentication manager.
     auth: GcpAuth,
-    /// Target GCP project ID,
+    /// Target GCP project ID.
     project: String,
 }
 
 impl LogsClient {
     /// Create a new LogsClient for the specified project.
-    ///
-    /// # Arguments
-    ///
-    /// * `auth` - GCP authentication manager
-    /// * `project` - GCP project ID to query logs from
     pub fn new(auth: GcpAuth, project: String) -> Self {
         Self {
             http: Client::new(),
@@ -110,23 +80,12 @@ impl LogsClient {
     }
 
     /// Query log entries from Cloud Logging.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Optional filter to apply (see [`LogFilter`])
-    /// * `page_size` - Maximum number of entries to return (max 1000)
-    ///
-    /// # Returns
-    ///
-    /// A vector of log entries matching the filter, ordered by timestamp descending.
     pub async fn list_entries(
         &self,
         filter: Option<&LogFilter>,
         page_size: usize,
     ) -> Result<Vec<LogEntry>, LogsError> {
         let token = self.auth.token().await?;
-
-        // Build the filter string
         let filter_str = filter.map(|f| f.build()).unwrap_or_default();
 
         debug!(
@@ -136,7 +95,6 @@ impl LogsClient {
             "Querying logs"
         );
 
-        // Build the request body
         let request_body = ListEntriesRequest {
             resource_names: vec![format!("projects/{}", self.project)],
             filter: if filter_str.is_empty() {
@@ -149,7 +107,6 @@ impl LogsClient {
             page_token: None,
         };
 
-        // Send request
         let response = self
             .http
             .post(LOGGING_API_URL)
@@ -158,7 +115,6 @@ impl LogsClient {
             .send()
             .await?;
 
-        // Check errors
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
@@ -168,19 +124,15 @@ impl LogsClient {
             });
         }
 
-        // parse response
         let response_body: ListEntriesResponse = response
             .json()
             .await
             .map_err(|e| LogsError::ParseError(e.to_string()))?;
 
-        // return entries
         Ok(response_body.entries.unwrap_or_default())
     }
 
     /// Query log entries with pagination support.
-    ///
-    /// Returns entries along with a page token for fetching the next page
     pub async fn list_entries_paged(
         &self,
         filter: Option<&LogFilter>,
@@ -231,55 +183,20 @@ impl LogsClient {
     }
 
     /// Start streaming logs in real-time using polling.
-    ///
-    /// This method spawns a background task that polls for new logs every
-    /// `POLL_INTERVAL_SECS` seconds and sends them to the returned channel.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Optional filter to apply to streamed logs
-    /// * `lookback` - How far back to look for initial logs (e.g., 1 hour)
-    ///
-    /// # Returns
-    ///
-    /// A tuple of:
-    /// - `mpsc::Receiver<LogEntry>` - Channel to receive log entries
-    /// - `StreamHandle` - Handle to control the stream (e.g., stop it)
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use gcp_racoon::gcp::{LogsClient, LogFilter};
-    /// # async fn example(client: LogsClient) -> anyhow::Result<()> {
-    /// let filter = LogFilter::new().severity_min("WARNING");
-    /// let (mut rx, handle) = client.stream_entries(Some(filter), chrono::Duration::hours(1)).await?;
-    ///
-    /// while let Some(entry) = rx.recv().await {
-    ///     println!("{}", entry.message_preview());
-    /// }
-    ///
-    /// // To stop streaming:
-    /// handle.stop();
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn stream_entries(
         &self,
         filter: Option<LogFilter>,
         lookback: Duration,
     ) -> Result<(mpsc::Receiver<LogEntry>, StreamHandle), LogsError> {
-        // verify auth before streaming
         self.auth.verify().await?;
 
         let (tx, rx) = mpsc::channel::<LogEntry>(256);
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
 
-        // Clone what we need for the spawned task
         let http = self.http.clone();
         let project = self.project.clone();
         let auth = self.auth.clone();
 
-        // Calculate initial timestamp
         let initial_timestamp = Utc::now() - lookback;
 
         tokio::spawn(async move {
@@ -298,20 +215,17 @@ impl LogsClient {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Build filter with timestamp constraint
                         let mut poll_filter = filter.clone().unwrap_or_default();
                         poll_filter = poll_filter.timestamp_after(last_timestamp);
 
                         match poll_logs(&http, &auth, &project, &poll_filter).await {
                             Ok(entries) => {
-                                // Update last_timestamp to the newest entry
                                 if let Some(newest) = entries.first()
                                     && let Some(ts) = newest.timestamp
                                 {
                                     last_timestamp = ts;
                                 }
 
-                                // Send entries (in reverse order so oldest first)
                                 for entry in entries.into_iter().rev() {
                                     if tx.send(entry).await.is_err() {
                                         debug!("Receiver dropped, stopping stream");
@@ -321,7 +235,6 @@ impl LogsClient {
                             }
                             Err(e) => {
                                 warn!("Error polling logs: {}", e);
-                                // Continue polling despite errors
                             }
                         }
                     }
@@ -387,31 +300,12 @@ pub struct StreamHandle {
 
 impl StreamHandle {
     /// Stop the log stream
-    ///
-    /// This will signal the streaming task to stop and drop the receiver.
     pub async fn stop(&self) {
         let _ = self.stop_tx.try_send(());
     }
 }
 
 /// Builder for constructing GCP Logging filter strings.
-///
-/// Provides a fluent API for building filter expressions that conform
-/// to the [GCP Logging query language](https://cloud.google.com/logging/docs/view/logging-query-language).
-///
-/// # Example
-///
-/// ```
-/// use gcp_racoon::gcp::LogFilter;
-///
-/// let filter = LogFilter::new()
-///     .severity_min("ERROR")
-///     .resource_type("cloud_run_revision")
-///     .text_contains("timeout");
-///
-/// println!("Filter: {}", filter.build());
-/// // Output: severity>=ERROR resource.type="cloud_run_revision" "timeout"
-/// ```
 #[derive(Debug, Clone, Default)]
 pub struct LogFilter {
     parts: Vec<String>,
@@ -424,9 +318,6 @@ impl LogFilter {
     }
 
     /// Add a minimum severity filter.
-    ///
-    /// Valid values: DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL, ALERT,
-    /// EMERGENCY
     pub fn severity_min(mut self, severity: &str) -> Self {
         self.parts
             .push(format!("severity>={}", severity.to_uppercase()));
@@ -441,8 +332,6 @@ impl LogFilter {
     }
 
     /// Add a resource type filter.
-    ///
-    /// Common values: cloud_run_revision, gke_container, gce_instance, cloud_function
     pub fn resource_type(mut self, resource_type: &str) -> Self {
         self.parts
             .push(format!("resource.type=\"{}\"", resource_type));
@@ -450,8 +339,6 @@ impl LogFilter {
     }
 
     /// Add a text search filter.
-    ///
-    /// Searches in textPayload and jsonPayload.message.
     pub fn text_contains(mut self, text: &str) -> Self {
         self.parts.push(format!("\"{}\"", text));
         self
@@ -480,8 +367,6 @@ impl LogFilter {
     }
 
     /// Add a raw filter expression
-    ///
-    /// Use this for advanced filters not covered by other methods.
     pub fn raw(mut self, expression: &str) -> Self {
         self.parts.push(expression.to_string());
         self
@@ -499,9 +384,6 @@ impl LogFilter {
 }
 
 /// A single log entry from Cloud Logging.
-///
-/// This struct mirrors the structure returned by the Cloud Logging API.
-/// See [LogEntry reference](https://cloud.google.com/logging/docs/reference/v2/rest/v2/LogEntry).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
@@ -561,8 +443,6 @@ impl LogEntry {
     }
 
     /// Get a short preview of the log message.
-    ///
-    /// Returns the first 100 characters of the message content.
     pub fn message_preview(&self) -> String {
         let message = self.message();
         if message.len() > 150 {
@@ -573,20 +453,15 @@ impl LogEntry {
     }
 
     /// Get the full log message.
-    ///
-    /// Extracts from textPayload, or jsonPayload.message, or serializes jsonPayload.
     pub fn message(&self) -> String {
-        // Try textPayload first
         if let Some(text) = &self.text_payload {
             return text.clone();
         }
 
-        // Try jsonPayload.message
         if let Some(json) = &self.json_payload {
             if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
                 return msg.to_string();
             }
-            // Fall back to serializing the whole JSON
             return serde_json::to_string(json).unwrap_or_else(|_| "[invalid json]".to_string());
         }
 
@@ -613,6 +488,77 @@ impl LogEntry {
             self.severity_or_default(),
             self.message_preview()
         )
+    }
+
+    /// Extract a correlation filter clause and short display identifier from this log entry.
+    ///
+    /// Checks `trace`, `span_id`, `labels`, and `json_payload` (for `trace_id`, `traceId`,
+    /// `request_id`, `requestId`, `correlation_id`, `correlationId`).
+    ///
+    /// Returns `Some((gcp_filter_clause, short_display_id))` when present.
+    pub fn correlation_id(&self) -> Option<(String, String)> {
+        if let Some(ref t) = self.trace
+            && !t.trim().is_empty()
+        {
+            let raw_id = t.rsplit('/').next().unwrap_or(t);
+            let short_id = shorten_id(raw_id, 8);
+            return Some((format!("trace=\"{}\"", t), short_id));
+        }
+
+        if let Some(ref s) = self.span_id
+            && !s.trim().is_empty()
+        {
+            let short_id = shorten_id(s, 8);
+            return Some((format!("spanId=\"{}\"", s), short_id));
+        }
+
+        const KEYS: &[&str] = &[
+            "trace_id",
+            "traceId",
+            "request_id",
+            "requestId",
+            "correlation_id",
+            "correlationId",
+        ];
+
+        if let Some(ref labels) = self.labels {
+            for &key in KEYS {
+                if let Some(val) = labels.get(key)
+                    && !val.trim().is_empty()
+                {
+                    let short_id = shorten_id(val, 8);
+                    return Some((format!("labels.{}=\"{}\"", key, val), short_id));
+                }
+            }
+        }
+
+        if let Some(ref json) = self.json_payload {
+            for &key in KEYS {
+                if let Some(val) = json.get(key).and_then(|v| v.as_str())
+                    && !val.trim().is_empty()
+                {
+                    let short_id = shorten_id(val, 8);
+                    return Some((format!("jsonPayload.{}=\"{}\"", key, val), short_id));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Return a compact badge (e.g., `"🔗105445aa"`) when this log entry carries a trace or correlation ID.
+    pub fn short_trace_badge(&self) -> Option<String> {
+        self.correlation_id()
+            .map(|(_, short_id)| format!("🔗{}", short_id))
+    }
+}
+
+fn shorten_id(s: &str, max_len: usize) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() > max_len {
+        trimmed.chars().take(max_len).collect()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -665,7 +611,6 @@ pub struct HttpRequest {
 // API Request/Response types (internal)
 // ============================================================================
 
-/// Request body for entries. list API.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ListEntriesRequest {
@@ -680,7 +625,6 @@ struct ListEntriesRequest {
     page_token: Option<String>,
 }
 
-/// Response body from entries.list API.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ListEntriesResponse {
@@ -689,10 +633,6 @@ struct ListEntriesResponse {
     #[serde(default)]
     next_page_token: Option<String>,
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -717,21 +657,18 @@ mod tests {
 
     #[test]
     fn test_log_entry_message() {
-        // Text payload
         let entry = LogEntry {
             text_payload: Some("Hello world".to_string()),
             ..Default::default()
         };
         assert_eq!(entry.message(), "Hello world");
 
-        // JSON payload with message
         let entry = LogEntry {
             json_payload: Some(serde_json::json!({"message": "From JSON"})),
             ..Default::default()
         };
         assert_eq!(entry.message(), "From JSON");
 
-        // Empty
         let entry = LogEntry::default();
         assert_eq!(entry.message(), "[no message]");
     }
@@ -755,5 +692,31 @@ mod tests {
         let entry = LogEntry::default();
         assert_eq!(entry.severity_or_default(), "DEFAULT");
         assert_eq!(entry.timestamp_str(), "--:--:--");
+    }
+
+    #[test]
+    fn test_log_entry_correlation_id() {
+        let entry = LogEntry {
+            trace: Some("projects/demo-proj/traces/105445aa7843bc8bf206b12000100000".to_string()),
+            ..Default::default()
+        };
+        let (filter, short_id) = entry.correlation_id().unwrap();
+        assert_eq!(
+            filter,
+            "trace=\"projects/demo-proj/traces/105445aa7843bc8bf206b12000100000\""
+        );
+        assert_eq!(short_id, "105445aa");
+        assert_eq!(entry.short_trace_badge().as_deref(), Some("🔗105445aa"));
+
+        let json_entry = LogEntry {
+            json_payload: Some(serde_json::json!({
+                "message": "Order failed",
+                "request_id": "req-9988776655"
+            })),
+            ..Default::default()
+        };
+        let (j_filter, j_short) = json_entry.correlation_id().unwrap();
+        assert_eq!(j_filter, "jsonPayload.request_id=\"req-9988776655\"");
+        assert_eq!(j_short, "req-9988");
     }
 }

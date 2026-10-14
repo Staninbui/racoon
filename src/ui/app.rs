@@ -36,6 +36,12 @@ pub struct App {
     /// Current filter string (applied to logs).
     pub filter: Option<String>,
 
+    /// Short display ID when Distributed Trace Context mode (`x` key) is active.
+    pub active_trace: Option<String>,
+
+    /// Saved filter prior to entering Trace Context mode, restored when exiting Trace mode.
+    pub previous_filter: Option<String>,
+
     /// Whether AI is available.
     pub ai_available: bool,
 
@@ -48,7 +54,7 @@ pub struct App {
     /// AI query that was sent to the LLM.
     pub ai_query: Option<String>,
 
-    /// Currently configured AI provider and model label (e.g., "google/gemini-3-flash-preview").
+    /// Currently configured AI provider and model label (e.g., "google/gemini-3.8-flash").
     pub ai_model_label: String,
 
     /// GCP project ID or offline file label.
@@ -84,10 +90,6 @@ pub struct App {
 
 impl App {
     /// Create a new App instance.
-    ///
-    /// # Arguments
-    ///
-    /// * `project` - The GCP project ID being monitored
     pub fn new(project: String) -> Self {
         Self {
             logs: Vec::with_capacity(DEFAULT_MAX_LOGS),
@@ -98,6 +100,8 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             filter: None,
+            active_trace: None,
+            previous_filter: None,
             ai_available: false,
             ai_response: None,
             ai_loading: false,
@@ -145,33 +149,60 @@ impl App {
         self
     }
 
-    /// Add a new log entry to the buffer.
+    /// Toggle Distributed Trace Context mode (`x` key).
     ///
-    /// Maintains the `max_logs` limit by removing oldest entries.
+    /// - If not in Trace mode, extracts the correlation/trace filter from the currently
+    ///   selected log entry, saves the current filter in `previous_filter`, activates
+    ///   Trace mode, and returns `Ok(Some(trace_filter))`.
+    /// - If already in Trace mode, exits Trace mode, restores `previous_filter`, and
+    ///   returns `Ok(previous_filter)`.
+    pub fn toggle_trace_context(&mut self) -> Result<Option<String>, String> {
+        if self.active_trace.is_some() {
+            let restored = self.exit_trace_context();
+            return Ok(restored);
+        }
+
+        let entry = self
+            .selected_log()
+            .ok_or_else(|| "No log entry selected.".to_string())?;
+
+        let (filter_clause, short_id) = entry.correlation_id().ok_or_else(|| {
+            "Selected log has no trace, spanId, or request_id to follow.".to_string()
+        })?;
+
+        self.previous_filter = self.filter.clone();
+        self.active_trace = Some(short_id);
+        self.set_filter(Some(filter_clause.clone()));
+        Ok(Some(filter_clause))
+    }
+
+    /// Exit Trace Context mode and restore the previous filter.
+    pub fn exit_trace_context(&mut self) -> Option<String> {
+        self.active_trace = None;
+        let restored = self.previous_filter.take();
+        self.set_filter(restored.clone());
+        restored
+    }
+
+    /// Add a new log entry to the buffer.
     pub fn add_log(&mut self, entry: LogEntry) {
-        // If a local filter is active and we don't have a live stream replacement,
-        // ensure incoming entries match the active filter.
         if let Some(ref filter_expr) = self.filter
             && !matches_local_filter(&entry, filter_expr)
         {
             return;
         }
 
-        // Check if user is at or near the bottom before adding
         let was_at_bottom = self.is_at_bottom();
 
         self.logs.push(entry);
 
-        // Remove oldest if we exceed the limit
         while self.logs.len() > self.max_logs {
             self.logs.remove(0);
-            // Adjust selection if needed
             if self.selected_index > 0 {
                 self.selected_index = self.selected_index.saturating_sub(1);
             }
         }
 
-        // Auto-follow: if user was at bottom, stay at bottom
         if was_at_bottom && self.is_streaming {
             self.selected_index = self.logs.len().saturating_sub(1);
         }
@@ -221,31 +252,25 @@ impl App {
         if self.logs.is_empty() {
             return true;
         }
-        // Consider "at bottom" if within last 2 items
         self.selected_index >= self.logs.len().saturating_sub(2)
     }
 
-    /// Scroll detail pane down.
     pub fn scroll_detail_down(&mut self) {
         self.detail_scroll = self.detail_scroll.saturating_add(1);
     }
 
-    /// Scroll detail pane up.
     pub fn scroll_detail_up(&mut self) {
         self.detail_scroll = self.detail_scroll.saturating_sub(1);
     }
 
-    /// Scroll AI pane down.
     pub fn scroll_ai_down(&mut self) {
         self.ai_scroll = self.ai_scroll.saturating_add(1);
     }
 
-    /// Scroll AI pane up.
     pub fn scroll_ai_up(&mut self) {
         self.ai_scroll = self.ai_scroll.saturating_sub(1);
     }
 
-    /// Reset scroll when content changes.
     pub fn reset_detail_scroll(&mut self) {
         self.detail_scroll = 0;
     }
@@ -254,90 +279,74 @@ impl App {
         self.ai_scroll = 0;
     }
 
-    /// Move selection to the next log entry.
     pub fn select_next(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = (self.selected_index + 1).min(self.logs.len() - 1);
         }
     }
 
-    /// Move selection to the previous log entry.
     pub fn select_previous(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = self.selected_index.saturating_sub(1);
         }
     }
 
-    /// Move selection to the first log entry.
     pub fn select_first(&mut self) {
         self.selected_index = 0;
     }
 
-    /// Move selection to the last log entry.
     pub fn select_last(&mut self) {
         if !self.logs.is_empty() {
             self.selected_index = self.logs.len() - 1;
         }
     }
 
-    /// Get the currently selected log entry.
     pub fn selected_log(&self) -> Option<&LogEntry> {
         self.logs.get(self.selected_index)
     }
 
-    /// Clear the AI response (called when selection changes).
     pub fn clear_ai_response(&mut self) {
         self.ai_response = None;
         self.ai_loading = false;
         self.ai_query = None;
-        self.ai_scroll = 0; // reset scroll
+        self.ai_scroll = 0;
     }
 
-    /// Set the AI response for the current selection.
     pub fn set_ai_response(&mut self, response: String) {
         self.ai_response = Some(response);
         self.ai_loading = false;
-        self.ai_scroll = 0; // reset scroll
+        self.ai_scroll = 0;
     }
 
-    /// Start AI loading state.
     pub fn start_ai_loading(&mut self) {
         self.ai_loading = true;
         self.ai_response = None;
     }
 
-    /// Toggle streaming on/off.
     pub fn toggle_streaming(&mut self) {
         if self.offline_logs.is_none() {
             self.is_streaming = !self.is_streaming;
         }
     }
 
-    /// Enter a specific input mode.
     pub fn enter_input_mode(&mut self, mode: InputMode) {
         self.input_mode = mode;
         self.input_buffer.clear();
     }
 
-    /// Exit input mode and return to normal.
     pub fn exit_input_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.input_buffer.clear();
     }
 
-    /// Handle a character input in input mode.
     pub fn input_char(&mut self, c: char) {
         self.input_buffer.push(c);
     }
 
-    /// Handle backspace in input mode.
     pub fn input_backspace(&mut self) {
         self.input_buffer.pop();
     }
 
-    /// Submit the current input.
-    ///
-    /// Returns the submitted text and the mode it was submitted in.
     pub fn submit_input(&mut self) -> (String, InputMode) {
         let text = self.input_buffer.clone();
         let mode = self.input_mode;
@@ -345,17 +354,14 @@ impl App {
         (text, mode)
     }
 
-    /// Set an error message to display.
     pub fn set_error(&mut self, message: String) {
         self.error_message = Some(message);
     }
 
-    /// Clear the current error message.
     pub fn clear_error(&mut self) {
         self.error_message = None;
     }
 
-    /// Perform a local search within loaded logs.
     pub fn search(&mut self, query: &str) {
         if query.is_empty() {
             self.clear_search();
@@ -364,25 +370,21 @@ impl App {
 
         let query_lower = query.to_lowercase();
 
-        // Find all matching log indices
         self.search_matches = self
             .logs
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                // Search in message
                 let message = entry.message_preview().to_lowercase();
                 if message.contains(&query_lower) {
                     return true;
                 }
 
-                // Search in severity
                 let severity = entry.severity_or_default().to_lowercase();
                 if severity.contains(&query_lower) {
                     return true;
                 }
 
-                // Search in full JSON (expensive but thorough)
                 if let Ok(json) = serde_json::to_string(entry)
                     && json.to_lowercase().contains(&query_lower)
                 {
@@ -397,13 +399,11 @@ impl App {
         self.search_query = Some(query.to_string());
         self.search_match_index = 0;
 
-        // Jump to first match
         if let Some(&first_match) = self.search_matches.first() {
             self.selected_index = first_match;
         }
     }
 
-    /// Jump to next search match.
     pub fn search_next(&mut self) {
         if self.search_matches.is_empty() {
             return;
@@ -413,7 +413,6 @@ impl App {
         self.selected_index = self.search_matches[self.search_match_index];
     }
 
-    /// Jump to previous search match.
     pub fn search_prev(&mut self) {
         if self.search_matches.is_empty() {
             return;
@@ -427,30 +426,25 @@ impl App {
         self.selected_index = self.search_matches[self.search_match_index];
     }
 
-    /// Clear search state.
     pub fn clear_search(&mut self) {
         self.search_query = None;
         self.search_matches.clear();
         self.search_match_index = 0;
     }
 
-    /// Check if a log index matches the current search.
     pub fn is_search_match(&self, index: usize) -> bool {
         self.search_matches.contains(&index)
     }
 
-    /// Create with specified theme.
     pub fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
         self
     }
 
-    /// Get current theme colors.
     pub fn colors(&self) -> ThemeColors {
         self.theme.colors()
     }
 
-    /// Toggle between dark and light theme.
     pub fn toggle_theme(&mut self) {
         self.theme = match self.theme {
             Theme::Dark => Theme::Light,
@@ -460,16 +454,12 @@ impl App {
 }
 
 /// Evaluate whether a `LogEntry` satisfies a filter expression locally.
-///
-/// Supports common GCP filter clauses (`severity>=...`, `severity=...`,
-/// `resource.type="..."`) as well as general substring matching.
 pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
     let expr = filter_expr.trim();
     if expr.is_empty() {
         return true;
     }
 
-    // Check individual space-separated clauses if they look like structured expressions
     for token in expr.split_whitespace() {
         let token_upper = token.to_uppercase();
         if let Some(target_sev) = token_upper.strip_prefix("SEVERITY>=") {
@@ -500,13 +490,29 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
             }
             continue;
         }
+        if let Some(trace_val) = token.strip_prefix("trace=") {
+            let trace_val = trace_val.trim_matches('"').trim_matches('\'');
+            if entry.trace.as_deref() != Some(trace_val) {
+                return false;
+            }
+            continue;
+        }
+        if let Some(span_val) = token.strip_prefix("spanId=") {
+            let span_val = span_val.trim_matches('"').trim_matches('\'');
+            if entry.span_id.as_deref() != Some(span_val) {
+                return false;
+            }
+            continue;
+        }
         if token.starts_with("timestamp>") || token.starts_with("timestamp<") {
-            // Timestamp bounds are handled by the server query
             continue;
         }
 
-        // Fallback: substring match on message, severity, resource type, or JSON
-        let needle = token.trim_matches('"').trim_matches('\'').to_lowercase();
+        let needle = if let Some((_, val)) = token.split_once('=') {
+            val.trim_matches('"').trim_matches('\'').to_lowercase()
+        } else {
+            token.trim_matches('"').trim_matches('\'').to_lowercase()
+        };
         if needle.is_empty() {
             continue;
         }
@@ -549,21 +555,13 @@ fn severity_rank(sev: &str) -> u8 {
 /// Input mode for the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
-    /// Normal navigation mode.
     Normal,
-
-    /// Entering a GCP filter query.
     Filter,
-
-    /// Entering a natural language query for AI.
     AiQuery,
-
-    /// Searching within current logs.
     Search,
 }
 
 impl InputMode {
-    /// Get the prompt text for this mode.
     pub fn prompt(&self) -> &'static str {
         match self {
             InputMode::Normal => "",
@@ -581,14 +579,11 @@ mod tests {
     #[test]
     fn test_app_add_log_respects_limit() {
         let mut app = App::new("test-project".to_string());
-
-        // Add more than DEFAULT_MAX_LOGS entries
         for i in 0..150 {
             let mut entry = LogEntry::default();
             entry.insert_id = Some(format!("log-{}", i));
             app.add_log(entry);
         }
-
         assert_eq!(app.logs.len(), DEFAULT_MAX_LOGS);
     }
 
@@ -601,6 +596,48 @@ mod tests {
             app.add_log(entry);
         }
         assert_eq!(app.logs.len(), 25);
+    }
+
+    #[test]
+    fn test_app_trace_context_toggle() {
+        let entries = vec![
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Gateway request received".to_string()),
+                trace: Some("projects/p/traces/trace-abc-12345".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Unrelated background job".to_string()),
+                trace: Some("projects/p/traces/other-99999".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("DB timeout in payment service".to_string()),
+                trace: Some("projects/p/traces/trace-abc-12345".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
+        assert_eq!(app.logs.len(), 3);
+
+        // Toggle trace context on first log
+        let filter = app.toggle_trace_context().unwrap();
+        assert_eq!(
+            filter.as_deref(),
+            Some("trace=\"projects/p/traces/trace-abc-12345\"")
+        );
+        assert_eq!(app.active_trace.as_deref(), Some("trace-ab"));
+        assert_eq!(app.logs.len(), 2);
+
+        // Toggle again exits trace mode and restores all 3 logs
+        let restored = app.toggle_trace_context().unwrap();
+        assert!(restored.is_none());
+        assert!(app.active_trace.is_none());
+        assert_eq!(app.logs.len(), 3);
     }
 
     #[test]
@@ -632,7 +669,7 @@ mod tests {
     #[test]
     fn test_app_navigation() {
         let mut app = App::new("test".to_string());
-        app.is_streaming = false; // Disable auto-follow for testing
+        app.is_streaming = false;
 
         for i in 0..10 {
             let mut entry = LogEntry::default();
@@ -641,13 +678,10 @@ mod tests {
         }
 
         assert_eq!(app.selected_index, 0);
-
         app.select_next();
         assert_eq!(app.selected_index, 1);
-
         app.select_last();
         assert_eq!(app.selected_index, 9);
-
         app.select_first();
         assert_eq!(app.selected_index, 0);
     }

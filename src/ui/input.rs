@@ -14,6 +14,8 @@ pub enum Action {
     None,
     /// Request AI explanation for current log.
     ExplainLog,
+    /// Request Full-Trace / Multi-Log AI Root Cause Analysis.
+    AnalyzeTrace,
     /// Request AI query generation.
     GenerateQuery(String),
     /// Request AI question generation.
@@ -25,10 +27,7 @@ pub enum Action {
 }
 
 /// Handle a keyboard event
-///
-/// This function dispatches to mode-specific handlers based on the current input mode.
 pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
-    // Clear any error message on key press
     app.clear_error();
 
     match app.input_mode {
@@ -89,19 +88,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             app.select_previous();
             Action::None
         }
-        KeyCode::Char('g') => {
+        KeyCode::Char('g') | KeyCode::Home => {
             app.select_first();
             Action::None
         }
-        KeyCode::Char('G') => {
-            app.select_last();
-            Action::None
-        }
-        KeyCode::Home => {
-            app.select_first();
-            Action::None
-        }
-        KeyCode::End => {
+        KeyCode::Char('G') | KeyCode::End => {
             app.select_last();
             Action::None
         }
@@ -131,19 +122,41 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             if app.ai_available {
                 app.enter_input_mode(InputMode::AiQuery);
             } else {
-                app.set_error("AI not available. Set GEMINI_API_KEY.".to_string());
+                app.set_error("AI not available. Press 'm' or configure API key.".to_string());
             }
             Action::None
         }
 
-        // AI explain current log
+        // Toggle Distributed Trace Context Explorer (`x` key)
+        KeyCode::Char('x') => match app.toggle_trace_context() {
+            Ok(new_filter) => Action::ApplyFilter(new_filter),
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
+
+        // AI explain current log (`e` key)
         KeyCode::Char('e') => {
             if app.ai_available && app.selected_log().is_some() {
                 Action::ExplainLog
             } else if !app.ai_available {
-                app.set_error("AI not available. Set GEMINI_API_KEY.".to_string());
+                app.set_error("AI not available. Press 'm' or configure API key.".to_string());
                 Action::None
             } else {
+                Action::None
+            }
+        }
+
+        // Full-Trace / Multi-Log AI Root Cause Analysis (`E` key — Shift+e)
+        KeyCode::Char('E') => {
+            if app.ai_available && !app.logs.is_empty() {
+                Action::AnalyzeTrace
+            } else if !app.ai_available {
+                app.set_error("AI not available. Press 'm' or configure API key.".to_string());
+                Action::None
+            } else {
+                app.set_error("No logs loaded to analyze.".to_string());
                 Action::None
             }
         }
@@ -163,11 +176,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
         // Switch AI model interactively
         KeyCode::Char('m') => Action::SwitchModel,
 
-        // Clear
+        // Clear search / exit Trace mode / clear filter
         KeyCode::Esc => {
-            let had_filter = app.filter.is_some();
             app.clear_search();
             app.clear_ai_response();
+            if app.active_trace.is_some() {
+                let restored = app.exit_trace_context();
+                return Action::ApplyFilter(restored);
+            }
+            let had_filter = app.filter.is_some();
             app.set_filter(None);
             if had_filter {
                 Action::ApplyFilter(None)
@@ -183,13 +200,11 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
 /// Handle keys in input mode.
 fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        // Cancel
         KeyCode::Esc => {
             app.exit_input_mode();
             Action::None
         }
 
-        // Submit
         KeyCode::Enter => {
             let (text, mode) = app.submit_input();
 
@@ -199,15 +214,13 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
 
             match mode {
                 InputMode::Filter => {
+                    app.active_trace = None;
+                    app.previous_filter = None;
                     app.set_filter(Some(text.clone()));
                     Action::ApplyFilter(Some(text))
                 }
-                InputMode::AiQuery => {
-                    // Return action for AI processing
-                    Action::AskQuestion(text)
-                }
+                InputMode::AiQuery => Action::AskQuestion(text),
                 InputMode::Search => {
-                    // Perform local search
                     app.search(&text);
                     if app.search_matches.is_empty() {
                         app.set_error(format!("No matches for '{}'", text));
@@ -218,19 +231,16 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
             }
         }
 
-        // Clear line
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.input_buffer.clear();
             Action::None
         }
 
-        // Text input
         KeyCode::Char(c) => {
             app.input_char(c);
             Action::None
         }
 
-        // Backspace
         KeyCode::Backspace => {
             app.input_backspace();
             Action::None
@@ -261,15 +271,12 @@ mod tests {
     #[test]
     fn test_navigation_keys() {
         let mut app = App::new("test".to_string());
-        app.is_streaming = false; // Disable auto-follow for testing
+        app.is_streaming = false;
 
-        // Add some logs
         for _ in 0..10 {
             app.add_log(LogEntry::default());
         }
 
-        // After adding logs with streaming off, selected_index should be 0
-        // Move to index 1 first
         handle_key_event(&mut app, make_key(KeyCode::Char('j')));
         assert_eq!(app.selected_index, 1);
 
@@ -306,10 +313,37 @@ mod tests {
         assert!(matches!(action, Action::ApplyFilter(Some(ref f)) if f == "severity>=ERROR"));
         assert_eq!(app.filter.as_deref(), Some("severity>=ERROR"));
 
-        // Pressing Esc in Normal mode clears the filter and triggers ApplyFilter(None)
         let clear_action = handle_key_event(&mut app, make_key(KeyCode::Esc));
         assert!(matches!(clear_action, Action::ApplyFilter(None)));
         assert!(app.filter.is_none());
+    }
+
+    #[test]
+    fn test_trace_key_x_and_analyze_trace_key_shift_e() {
+        let mut app = App::new("test".to_string()).with_offline_logs(vec![LogEntry {
+            severity: Some("ERROR".to_string()),
+            trace: Some("projects/demo/traces/abcdef123456".to_string()),
+            text_payload: Some("DB error".to_string()),
+            ..Default::default()
+        }]);
+        app.ai_available = true;
+
+        // Pressing 'x' enters trace mode and returns ApplyFilter
+        let action = handle_key_event(&mut app, make_key(KeyCode::Char('x')));
+        assert!(matches!(
+            action,
+            Action::ApplyFilter(Some(ref f)) if f == "trace=\"projects/demo/traces/abcdef123456\""
+        ));
+        assert_eq!(app.active_trace.as_deref(), Some("abcdef12"));
+
+        // Pressing 'E' triggers AnalyzeTrace
+        let rca_action = handle_key_event(&mut app, make_key(KeyCode::Char('E')));
+        assert!(matches!(rca_action, Action::AnalyzeTrace));
+
+        // Pressing 'x' again exits trace mode
+        let exit_action = handle_key_event(&mut app, make_key(KeyCode::Char('x')));
+        assert!(matches!(exit_action, Action::ApplyFilter(None)));
+        assert!(app.active_trace.is_none());
     }
 
     #[test]
@@ -317,12 +351,10 @@ mod tests {
         let mut app = App::new("test".to_string());
         app.add_log(LogEntry::default());
 
-        // Without AI
         app.ai_available = false;
         let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
         assert!(matches!(action, Action::None));
 
-        // With AI
         app.ai_available = true;
         let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
         assert!(matches!(action, Action::ExplainLog));
