@@ -40,7 +40,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc;
 
-use crate::ai::{GeminiClient, UserIntent};
+use crate::ai::{GeminiClient, ModelsRegistry, UserIntent, select_with_terminal};
+use crate::config::Config;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::ui::theme::Theme;
 use crate::utils::sanitize_query;
@@ -49,7 +50,6 @@ use widgets::{render_ai_pane, render_detail_pane, render_input_bar, render_log_l
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
 /// AI request types for the background worker.
-#[derive(Debug)]
 pub enum AiRequest {
     /// Explain a single log entry.
     ExplainLog(Box<LogEntry>),
@@ -58,6 +58,8 @@ pub enum AiRequest {
         question: String,
         local_logs: Vec<LogEntry>,
     },
+    /// Dynamically switch the active AI client after selecting a new provider/model in TUI.
+    UpdateClient(Option<GeminiClient>),
 }
 
 /// AI response from the background worker.
@@ -86,7 +88,7 @@ pub enum AiResponse {
 ///
 /// * `app` - The application state
 /// * `log_rx` - Channel receiver for incoming log entries
-/// * `gemini` - Optional Gemini AI client
+/// * `gemini` - Optional AI client
 /// * `logs_client` - Optional GCP Logs client (present in live `tail` mode, `None` in offline `view` mode)
 ///
 /// # Returns
@@ -98,26 +100,47 @@ pub async fn run_app(
     gemini: Option<GeminiClient>,
     logs_client: Option<LogsClient>,
 ) -> Result<()> {
-    // Create AI communication channels if AI is available
+    // Create AI communication channels
     let (ai_tx, mut ai_rx) = mpsc::channel::<AiResponse>(16);
     let (ai_request_tx, mut ai_request_rx) = mpsc::channel::<AiRequest>(16);
 
-    // Spawn AI worker task if Gemini is available
-    if let Some(client) = gemini {
-        let ai_tx_clone = ai_tx.clone();
-        let worker_logs_client = logs_client.clone();
-        tokio::spawn(async move {
-            while let Some(request) = ai_request_rx.recv().await {
-                let result = match request {
-                    AiRequest::ExplainLog(entry) => match client.explain_log(&entry).await {
-                        Ok(text) => AiResponse::Explanation(text),
-                        Err(e) => AiResponse::Error(e.to_string()),
-                    },
-                    AiRequest::AskQuestion {
-                        question: input,
-                        local_logs,
-                    } => {
-                        // First detect intent
+    if let Some(ref c) = gemini {
+        app.ai_available = true;
+        app.ai_model_label = format!("{}/{}", c.provider().id(), c.model());
+    }
+
+    // Spawn AI worker task (supports hot-swapping client via AiRequest::UpdateClient)
+    let ai_tx_clone = ai_tx.clone();
+    let worker_logs_client = logs_client.clone();
+    let mut current_client = gemini;
+    tokio::spawn(async move {
+        while let Some(request) = ai_request_rx.recv().await {
+            match request {
+                AiRequest::UpdateClient(new_client) => {
+                    current_client = new_client;
+                    continue;
+                }
+                AiRequest::ExplainLog(entry) => {
+                    let result = if let Some(ref client) = current_client {
+                        match client.explain_log(&entry).await {
+                            Ok(text) => AiResponse::Explanation(text),
+                            Err(e) => AiResponse::Error(e.to_string()),
+                        }
+                    } else {
+                        AiResponse::Error(
+                            "AI client not configured. Press 'm' to select a provider/model."
+                                .to_string(),
+                        )
+                    };
+                    if ai_tx_clone.send(result).await.is_err() {
+                        break;
+                    }
+                }
+                AiRequest::AskQuestion {
+                    question: input,
+                    local_logs,
+                } => {
+                    let result = if let Some(ref client) = current_client {
                         match client.detect_intent(&input).await {
                             Ok(UserIntent::SetFilter {
                                 filter,
@@ -133,7 +156,6 @@ pub async fn run_app(
                                 }
                             }
                             Ok(UserIntent::Question { question }) => {
-                                // Live GCP Q&A flow if connected, otherwise analyze local/offline logs
                                 if let Some(ref lc) = worker_logs_client {
                                     match client.ask_question(&question, lc).await {
                                         Ok(qa) => AiResponse::QuestionAnswer {
@@ -166,27 +188,24 @@ pub async fn run_app(
                             }
                             Err(e) => AiResponse::Error(e.to_string()),
                         }
-                    }
-                };
+                    } else {
+                        AiResponse::Error(
+                            "AI client not configured. Press 'm' to select a provider/model."
+                                .to_string(),
+                        )
+                    };
 
-                if ai_tx_clone.send(result).await.is_err() {
-                    break; // Main task dropped, exit
+                    if ai_tx_clone.send(result).await.is_err() {
+                        break;
+                    }
                 }
             }
-        });
-        app.ai_available = true;
-    }
+        }
+    });
 
     // Initialize terminal
     let mut terminal = ratatui::init();
     terminal.clear()?;
-
-    // Store the request sender in a local variable for the event loop
-    let ai_request_tx = if app.ai_available {
-        Some(ai_request_tx)
-    } else {
-        None
-    };
 
     // Main event loop
     let result = run_event_loop(
@@ -194,7 +213,7 @@ pub async fn run_app(
         &mut app,
         &mut log_rx,
         &mut ai_rx,
-        ai_request_tx.as_ref(),
+        Some(&ai_request_tx),
         logs_client.as_ref(),
     )
     .await;
@@ -262,6 +281,45 @@ async fn run_event_loop(
                 input::Action::ApplyFilter(new_filter) => {
                     if let Some(lc) = logs_client {
                         restart_live_stream(app, log_rx, lc, new_filter.as_deref()).await;
+                    }
+                }
+                input::Action::SwitchModel => {
+                    let mut config = Config::load();
+                    let registry = ModelsRegistry::load();
+                    if let Ok(Some((provider, model))) =
+                        select_with_terminal(terminal, &config, &registry)
+                    {
+                        config.set_active_model(provider.id(), &model.id);
+                        let _ = config.save();
+                        app.ai_model_label = format!("{}/{}", provider.id(), model.id);
+
+                        match GeminiClient::from_config(&config) {
+                            Ok(new_client) => {
+                                app.ai_available = true;
+                                if let Some(tx) = ai_tx {
+                                    let _ =
+                                        tx.send(AiRequest::UpdateClient(Some(new_client))).await;
+                                }
+                                app.set_ai_response(format!(
+                                    "✅ 已切换 AI 模型: {} ({})\n\n{}",
+                                    model.display_name,
+                                    provider.display_name(),
+                                    model.description
+                                ));
+                            }
+                            Err(e) => {
+                                app.ai_available = false;
+                                if let Some(tx) = ai_tx {
+                                    let _ = tx.send(AiRequest::UpdateClient(None)).await;
+                                }
+                                app.set_error(format!(
+                                    "已选择 {}/{}，但缺少凭证: {}",
+                                    provider.id(),
+                                    model.id,
+                                    e
+                                ));
+                            }
+                        }
                     }
                 }
                 input::Action::ExplainLog => {
@@ -404,8 +462,8 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let header_text = format!(
-        " 🦝 racoon │ {} │ {} logs │ {} │ ",
-        project, log_count, theme_indicator,
+        " 🦝 racoon │ {} │ {} logs │ 🤖 {} │ {} │ ",
+        project, log_count, app.ai_model_label, theme_indicator,
     );
 
     let header = Paragraph::new(Line::from(vec![

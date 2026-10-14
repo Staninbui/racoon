@@ -44,7 +44,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         // Show keyboard hints
         let hints_text = "\
-j/k: Navigate │ e: AI Explain │ ?: AI Query │ /: Search │ f: Filter │ p: Pause    │t: Theme   │ q: Quit
+j/k: Navigate │ e: AI Explain │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ p: Pause │ t: Theme │ q: Quit
 g/HOME: First │ G/END: Last   │ PgDown: +10 │ PgUp: -10 │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()

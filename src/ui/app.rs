@@ -45,8 +45,11 @@ pub struct App {
     /// Whether AI analysis is in progress.
     pub ai_loading: bool,
 
-    /// AI query that was sent to Gemini.
+    /// AI query that was sent to the LLM.
     pub ai_query: Option<String>,
+
+    /// Currently configured AI provider and model label (e.g., "google/gemini-3-flash-preview").
+    pub ai_model_label: String,
 
     /// GCP project ID or offline file label.
     pub project: String,
@@ -99,6 +102,7 @@ impl App {
             ai_response: None,
             ai_loading: false,
             ai_query: None,
+            ai_model_label: "google/gemini-3.8-flash".to_string(),
             project,
             is_streaming: true,
             should_quit: false,
@@ -110,6 +114,12 @@ impl App {
             search_match_index: 0,
             theme: Theme::Dark,
         }
+    }
+
+    /// Set the active AI provider/model label displayed in the header.
+    pub fn with_ai_model_label(mut self, label: String) -> Self {
+        self.ai_model_label = label;
+        self
     }
 
     /// Set the maximum number of logs to keep in memory.

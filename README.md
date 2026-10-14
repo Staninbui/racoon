@@ -156,7 +156,9 @@ racoon auth
 | `auth` | Verify authentication status |
 | `export` | Export logs to a file |
 | `download` | Quick download logs |
-| `view` | View logs from a local file (offline) |
+| `view` | View logs from a local file (interactive TUI or `--no-tui`) |
+| `models` | Interactively select, list, or update AI models (Google, OpenAI, Anthropic, Agnes AI) |
+| `update` | Check for racoon updates and overwrite/refresh the AI models registry |
 | `config` | Manage configuration |
 
 ### Tail Mode (TUI)
@@ -181,12 +183,29 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `f` | Set GCP filter |
 | `e` | Explain selected log with AI |
 | `?` | Ask AI a question |
+| `m` | Open interactive AI Provider & Model selector |
 | `p` | Pause/resume streaming |
 | `t` | Toggle theme (dark/light) |
 | `Ctrl+j/k` | Scroll detail pane |
 | `Ctrl+n/p` | Scroll AI pane |
 | `Esc` | Clear search/AI/filter |
 | `q` | Quit |
+
+### Multi-Provider AI Models & Self-Update
+
+```bash
+# Launch interactive two-step selector (Step 1: Provider -> Step 2: Model)
+racoon models
+
+# List all supported providers and cached models
+racoon models list
+
+# Manually sync latest models from provider APIs
+racoon models update
+
+# Check for racoon version updates and overwrite/refresh the models registry
+racoon update
+```
 
 ### Query Mode
 
@@ -213,7 +232,7 @@ racoon export --project my-project --output errors.json --ai "critical errors la
 # Export to NDJSON (newline-delimited)
 racoon export --project my-project --output logs.ndjson --format ndjson
 
-# View exported logs offline
+# View exported logs offline (opens interactive TUI by default, or use --no-tui)
 racoon view logs.json
 ```
 
@@ -240,10 +259,23 @@ racoon config edit
 Config file location: `~/.config/racoon/config.toml`
 
 ```toml
-# AI Settings
+# AI Settings (Multi-Provider: google, openai, anthropic, agnes)
 [ai]
-api_key = "your-gemini-api-key"
+provider = "google"
 model = "gemini-3-flash-preview"
+
+[ai.providers.google]
+api_key = "your-gemini-api-key"
+
+[ai.providers.openai]
+api_key = "your-openai-api-key"
+
+[ai.providers.anthropic]
+api_key = "your-anthropic-api-key"
+
+[ai.providers.agnes]
+api_key = "your-agnes-api-key"
+base_url = "https://apihub.agnes-ai.com/v1"
 
 # Default Values
 [defaults]
@@ -267,7 +299,10 @@ level = "info"
 
 | Variable | Description |
 |----------|-------------|
-| `GEMINI_API_KEY` | Gemini API key (overrides config) |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `OPENAI_API_KEY` | OpenAI GPT API key |
+| `ANTHROPIC_API_KEY` | Anthropic Claude API key |
+| `AGNES_API_KEY` | Agnes AI API key |
 | `GOOGLE_APPLICATION_CREDENTIALS` | Path to GCP service account key |
 
 ---

@@ -9,21 +9,10 @@
 //!
 //! - Linux/macOS: `~/.config/racoon/config.toml`
 //! - Windows: `%APPDATA%\racoon\config.toml`
-//!
-//! # Example Config
-//!
-//! ```toml
-//! [ai]
-//! api_key = "AIza..."
-//!
-//! [defaults]
-//! project = "my-project-123"
-//! since = "1h"
-//! ```
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -35,12 +24,15 @@ pub enum ConfigError {
 
     #[error("Parse error: {0}")]
     Parse(#[from] toml::de::Error),
+
+    #[error("Serialize error: {0}")]
+    Serialize(#[from] toml::ser::Error),
 }
 
 /// Main configuration structure.
-#[derive(Debug, Deserialize, Default, Clone)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Config {
-    /// AI (Gemini) settings.
+    /// AI settings (active provider, model, and per-provider credentials).
     #[serde(default)]
     pub ai: AiConfig,
 
@@ -58,33 +50,81 @@ pub struct Config {
 }
 
 /// AI configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AiConfig {
-    /// Gemini API key (can also use GEMINI_API_KEY env var).
+    /// Active AI provider ("google", "openai", "anthropic", "agnes").
+    #[serde(default = "default_provider")]
+    pub provider: String,
+
+    /// Legacy/fallback API key (can also use provider-specific keys or env vars).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 
-    /// Model name to use.
+    /// Active model name to use.
     #[serde(default = "default_model")]
     pub model: String,
+
+    /// Per-provider credentials and optional custom base URLs.
+    #[serde(default)]
+    pub providers: ProvidersConfig,
+}
+
+/// Per-provider configuration block (`[ai.providers.<name>]`).
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct ProvidersConfig {
+    /// Google Gemini configuration (`GEMINI_API_KEY`).
+    #[serde(default)]
+    pub google: ProviderEndpointConfig,
+
+    /// OpenAI GPT configuration (`OPENAI_API_KEY`).
+    #[serde(default)]
+    pub openai: ProviderEndpointConfig,
+
+    /// Anthropic Claude configuration (`ANTHROPIC_API_KEY`).
+    #[serde(default)]
+    pub anthropic: ProviderEndpointConfig,
+
+    /// Agnes AI configuration (`AGNES_API_KEY`).
+    #[serde(default)]
+    pub agnes: ProviderEndpointConfig,
+}
+
+/// Endpoint and credential settings for an individual AI provider.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct ProviderEndpointConfig {
+    /// Provider API key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Optional custom API base URL override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+fn default_provider() -> String {
+    "google".to_string()
 }
 
 fn default_model() -> String {
-    "gemini-3-flash-preview".to_string()
+    "gemini-3.8-flash".to_string()
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
+            provider: default_provider(),
             api_key: None,
             model: default_model(),
+            providers: ProvidersConfig::default(),
         }
     }
 }
 
 /// Default values configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DefaultsConfig {
     /// Default GCP project ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 
     /// Default time range for queries (e.g., "1h", "30m", "24h").
@@ -96,6 +136,7 @@ pub struct DefaultsConfig {
     pub limit: usize,
 
     /// Default severity filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub severity: Option<String>,
 }
 
@@ -119,7 +160,7 @@ fn default_limit() -> usize {
 }
 
 /// UI configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UiConfig {
     /// Maximum number of logs to keep in memory.
     #[serde(default = "default_max_logs")]
@@ -153,7 +194,7 @@ fn default_theme() -> String {
 }
 
 /// Logging configuration.
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LoggingConfig {
     /// Log level (debug/info/warn/error).
     #[serde(default = "default_log_level")]
@@ -203,6 +244,29 @@ impl Config {
         Ok(config)
     }
 
+    /// Save configuration to a specific file path.
+    pub fn save_to_file(&self, path: &PathBuf) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Save configuration to the default config file path.
+    pub fn save(&self) -> Result<PathBuf, ConfigError> {
+        let path = Self::default_path();
+        self.save_to_file(&path)?;
+        Ok(path)
+    }
+
+    /// Update active AI provider and model in memory.
+    pub fn set_active_model(&mut self, provider: &str, model: &str) {
+        self.ai.provider = provider.to_lowercase();
+        self.ai.model = model.to_string();
+    }
+
     /// Get the default config file path.
     ///
     /// - Linux/macOS: `~/.config/racoon/config.toml`
@@ -214,11 +278,74 @@ impl Config {
             .join("config.toml")
     }
 
-    /// Get Gemini API key (env var takes precedence over config file).
+    /// Get API key for a specific provider (environment variable takes precedence over config file).
+    pub fn get_provider_api_key(&self, provider: &str) -> Option<String> {
+        let p = provider.trim().to_lowercase();
+        match p.as_str() {
+            "google" | "gemini" => std::env::var("GEMINI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| self.ai.providers.google.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| self.ai.api_key.clone().filter(|k| !k.is_empty())),
+            "openai" | "gpt" => std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| self.ai.providers.openai.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| {
+                    if self.ai.provider.eq_ignore_ascii_case("openai") {
+                        self.ai.api_key.clone().filter(|k| !k.is_empty())
+                    } else {
+                        None
+                    }
+                }),
+            "anthropic" | "claude" => std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| {
+                    self.ai
+                        .providers
+                        .anthropic
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                })
+                .or_else(|| {
+                    if self.ai.provider.eq_ignore_ascii_case("anthropic") {
+                        self.ai.api_key.clone().filter(|k| !k.is_empty())
+                    } else {
+                        None
+                    }
+                }),
+            "agnes" | "agnes-ai" => std::env::var("AGNES_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+                .or_else(|| self.ai.providers.agnes.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| {
+                    if self.ai.provider.eq_ignore_ascii_case("agnes") {
+                        self.ai.api_key.clone().filter(|k| !k.is_empty())
+                    } else {
+                        None
+                    }
+                }),
+            _ => self.ai.api_key.clone().filter(|k| !k.is_empty()),
+        }
+    }
+
+    /// Get custom base URL for a specific provider if configured.
+    pub fn get_provider_base_url(&self, provider: &str) -> Option<String> {
+        match provider.trim().to_lowercase().as_str() {
+            "google" | "gemini" => self.ai.providers.google.base_url.clone(),
+            "openai" | "gpt" => self.ai.providers.openai.base_url.clone(),
+            "anthropic" | "claude" => self.ai.providers.anthropic.base_url.clone(),
+            "agnes" | "agnes-ai" => self.ai.providers.agnes.base_url.clone(),
+            _ => None,
+        }
+        .filter(|u| !u.trim().is_empty())
+    }
+
+    /// Get API key for the currently active AI provider.
     pub fn get_api_key(&self) -> Option<String> {
-        std::env::var("GEMINI_API_KEY")
-            .ok()
-            .or_else(|| self.ai.api_key.clone())
+        self.get_provider_api_key(&self.ai.provider)
     }
 
     /// Initialize default config file if it doesn't exist.
@@ -255,17 +382,31 @@ mod tests {
         assert_eq!(config.defaults.since, "1h");
         assert_eq!(config.defaults.limit, 100);
         assert_eq!(config.ui.max_logs, 100);
-        assert_eq!(config.ai.model, "gemini-3-flash-preview");
+        assert_eq!(config.ai.provider, "google");
+        assert_eq!(config.ai.model, "gemini-3.8-flash");
     }
 
     #[test]
-    fn test_load_from_file() {
+    fn test_load_and_save_multi_provider_config() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
         let content = r#"
 [ai]
-api_key = "test-key"
+provider = "anthropic"
+model = "claude-sonnet-4-5"
+
+[ai.providers.google]
+api_key = "google-key"
+
+[ai.providers.openai]
+api_key = "openai-key"
+
+[ai.providers.anthropic]
+api_key = "claude-key"
+
+[ai.providers.agnes]
+api_key = "agnes-key"
 
 [defaults]
 project = "test-project"
@@ -275,19 +416,43 @@ limit = 50
 
         std::fs::write(&path, content).unwrap();
 
-        let config = Config::load_from_file(&path.to_path_buf()).unwrap();
-        assert_eq!(config.ai.api_key, Some("test-key".to_string()));
-        assert_eq!(config.defaults.project, Some("test-project".to_string()));
-        assert_eq!(config.defaults.since, "2h");
-        assert_eq!(config.defaults.limit, 50);
+        let mut config = Config::load_from_file(&path.to_path_buf()).unwrap();
+        assert_eq!(config.ai.provider, "anthropic");
+        assert_eq!(config.ai.model, "claude-sonnet-4-5");
+        assert_eq!(
+            config.get_provider_api_key("google"),
+            Some("google-key".to_string())
+        );
+        assert_eq!(
+            config.get_provider_api_key("openai"),
+            Some("openai-key".to_string())
+        );
+        assert_eq!(
+            config.get_provider_api_key("anthropic"),
+            Some("claude-key".to_string())
+        );
+        assert_eq!(
+            config.get_provider_api_key("agnes"),
+            Some("agnes-key".to_string())
+        );
+
+        // Switch model and save
+        config.set_active_model("agnes", "agnes-3.0-pro");
+        config.save_to_file(&path.to_path_buf()).unwrap();
+
+        let reloaded = Config::load_from_file(&path.to_path_buf()).unwrap();
+        assert_eq!(reloaded.ai.provider, "agnes");
+        assert_eq!(reloaded.ai.model, "agnes-3.0-pro");
     }
 
     #[test]
     fn test_get_api_key_env_priority() {
         let config = Config {
             ai: AiConfig {
+                provider: "google".to_string(),
                 api_key: Some("config-key".to_string()),
                 model: default_model(),
+                providers: ProvidersConfig::default(),
             },
             ..Default::default()
         };

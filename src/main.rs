@@ -15,10 +15,10 @@ use tokio::sync::mpsc;
 use tracing::{Level, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
-use gcp_racoon::ai::GeminiClient;
+use gcp_racoon::ai::{GeminiClient, ModelsRegistry, ProviderKind, run_model_selector};
 use gcp_racoon::cli::{
-    Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, ExportArgs, QueryArgs, TailArgs,
-    ViewArgs,
+    Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, ExportArgs, ModelsAction, ModelsArgs,
+    QueryArgs, TailArgs, ViewArgs,
 };
 use gcp_racoon::config::Config;
 use gcp_racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
     let is_tui = match &cli.command {
         Commands::Tail(_) => true,
         Commands::View(args) => !args.json && !args.no_tui && std::io::stdout().is_terminal(),
+        Commands::Models(args) => matches!(args.action, None | Some(ModelsAction::Select)),
         _ => false,
     };
 
@@ -67,6 +68,8 @@ async fn main() -> Result<()> {
         Commands::Export(args) => handle_export(args, &config).await,
         Commands::View(args) => handle_view(args, &config).await,
         Commands::Config(args) => handle_config(args),
+        Commands::Models(args) => handle_models(args, &config).await,
+        Commands::Update => handle_update(&config).await,
     };
 
     // Handle errors gracefully at the top level
@@ -139,10 +142,14 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
 
     println!("✅ Connected to GCP");
 
-    // Try to initialize Gemini client
+    // Try to initialize AI client for the configured provider/model
     let gemini = match GeminiClient::from_config(config) {
         Ok(client) => {
-            info!("AI features enabled (Gemini)");
+            info!(
+                provider = client.provider().id(),
+                model = client.model(),
+                "AI features enabled"
+            );
             Some(client)
         }
         Err(e) => {
@@ -189,11 +196,14 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
         Some(ui_filter_parts.join(" "))
     };
 
+    let active_label = format!("{}/{}", config.ai.provider, config.ai.model);
+
     // Create app state with config settings
     let app = App::new(project.clone())
         .with_theme(theme)
         .with_max_logs(config.ui.max_logs)
-        .with_filter(initial_ui_filter);
+        .with_filter(initial_ui_filter)
+        .with_ai_model_label(active_label);
 
     // Run TUI
     run_app(app, rx, gemini, Some(client)).await?;
@@ -247,13 +257,11 @@ async fn handle_auth() -> Result<()> {
 
     println!("Checking GCP credentials...\n");
 
-    // Attempt to initialize authentication
     match GcpAuth::new().await {
         Ok(auth) => {
             let cred_info = auth.credential_info();
             println!(" Credential Source: {}", cred_info);
 
-            // Attempt to verify by getting a token
             match auth.verify().await {
                 Ok(()) => {
                     println!("\n✅ Authentication successful!");
@@ -300,7 +308,6 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
         "Downloading logs"
     );
 
-    // Initialize and verify authentication
     let auth = GcpAuth::new()
         .await
         .context("Failed to initialize GCP authentication")?;
@@ -319,10 +326,15 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
     };
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        let gemini =
-            GeminiClient::from_config(config).context("AI download requires GEMINI_API_KEY")?;
+        let gemini = GeminiClient::from_config(config)
+            .context("AI download requires an API key for the active provider")?;
 
-        println!("🦝 Generating query: \"{}\"", ai_prompt);
+        println!(
+            "🦝 Generating query with {}/{}: \"{}\"",
+            gemini.provider().id(),
+            gemini.model(),
+            ai_prompt
+        );
 
         let (query, result) =
             export_logs_with_ai(&client, &gemini, ai_prompt, &args.output, options).await?;
@@ -351,7 +363,6 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
-    // Initialize and verify authentication
     let auth = GcpAuth::new()
         .await
         .context("Failed to initialize GCP authentication")?;
@@ -370,11 +381,16 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
     let mut filter = LogFilter::new().since(duration);
 
     if let Some(ref ai_prompt) = args.ai {
-        let gemini =
-            GeminiClient::from_config(config).context("AI query requires GEMINI_API_KEY")?;
+        let gemini = GeminiClient::from_config(config)
+            .context("AI query requires an API key for the active provider")?;
 
         if !args.json {
-            println!("🦝 Generating query for: \"{}\"", ai_prompt);
+            println!(
+                "🦝 Generating query with {}/{}: \"{}\"",
+                gemini.provider().id(),
+                gemini.model(),
+                ai_prompt
+            );
         }
 
         let raw_query = gemini
@@ -387,8 +403,6 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
             println!("📋 Generated filter: {}", clean_query);
         }
 
-        // If AI generated its own timestamp constraint, use raw query directly;
-        // otherwise combine with our since filter.
         if clean_query.contains("timestamp") {
             filter = LogFilter::new().raw(&clean_query);
         } else {
@@ -400,14 +414,11 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
         filter = filter.severity_min(&default_sev.to_uppercase());
     }
 
-    // Fetch logs
     let entries = client.list_entries(Some(&filter), limit).await?;
 
     if args.json {
-        // JSON output
         println!("{}", serde_json::to_string_pretty(&entries)?);
     } else {
-        // Human-readable output
         println!("Found {} log entries:\n", entries.len());
 
         for entry in &entries {
@@ -449,26 +460,25 @@ async fn handle_view(args: ViewArgs, config: &Config) -> Result<()> {
     }
 
     if args.json {
-        // Output as JSON
         let entries_to_show: Vec<_> = result.entries.into_iter().take(args.limit).collect();
         println!("{}", serde_json::to_string_pretty(&entries_to_show)?);
     } else if result.entries.is_empty() {
         println!("\n(no entries to display)");
     } else if !args.no_tui && std::io::stdout().is_terminal() {
-        // Launch interactive TUI in offline mode
         let entries_to_show: Vec<_> = result.entries.into_iter().take(args.limit).collect();
         let theme = Theme::parse(&config.ui.theme);
         let gemini = GeminiClient::from_config(config).ok();
+        let active_label = format!("{}/{}", config.ai.provider, config.ai.model);
 
         let (_tx, rx) = mpsc::channel(1);
         let app = App::new(format!("file:{}", args.file))
             .with_theme(theme)
             .with_max_logs(config.ui.max_logs.max(entries_to_show.len()))
-            .with_offline_logs(entries_to_show);
+            .with_offline_logs(entries_to_show)
+            .with_ai_model_label(active_label);
 
         run_app(app, rx, gemini, None).await?;
     } else {
-        // Display in terminal (when --no-tui or piped)
         println!();
 
         let entries_to_show = result.entries.iter().take(args.limit);
@@ -509,7 +519,6 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
 
     let client = LogsClient::new(auth, args.project.clone());
 
-    // Parse format
     let format: ExportFormat = args
         .format
         .parse()
@@ -528,11 +537,15 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
     println!("   Format: {}", format.name());
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        // AI-assisted export
-        let gemini =
-            GeminiClient::from_config(config).context("AI export requires GEMINI_API_KEY")?;
+        let gemini = GeminiClient::from_config(config)
+            .context("AI export requires an API key for the active provider")?;
 
-        println!("   🦝 AI query: \"{}\"", ai_prompt);
+        println!(
+            "   🦝 AI query ({}/{}): \"{}\"",
+            gemini.provider().id(),
+            gemini.model(),
+            ai_prompt
+        );
 
         let (query, result) =
             export_logs_with_ai(&client, &gemini, ai_prompt, &args.output, options).await?;
@@ -540,7 +553,6 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
         println!("   Generated filter: {}", query);
         result
     } else {
-        // Regular export
         let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
 
         if let Some(ref f) = filter {
@@ -556,6 +568,183 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
     println!("   Size: {} bytes", result.size_bytes);
     println!("   File: {}", result.path);
 
+    Ok(())
+}
+
+/// Handle `racoon models` - interactive selection, listing, and manual model list update.
+async fn handle_models(args: ModelsArgs, config: &Config) -> Result<()> {
+    let mut registry = ModelsRegistry::load();
+    let action = args.action.unwrap_or(ModelsAction::Select);
+
+    match action {
+        ModelsAction::Select => {
+            if let Some((provider, model)) = run_model_selector(config, &registry)? {
+                let mut updated_config = config.clone();
+                updated_config.set_active_model(provider.id(), &model.id);
+                let saved_path = updated_config
+                    .save()
+                    .context("Failed to save selected model to config.toml")?;
+
+                println!(
+                    "✅ Switched active AI model to {} / {}",
+                    provider.display_name().green().bold(),
+                    model.id.cyan().bold()
+                );
+                println!("   Saved to: {}", saved_path.display());
+
+                if updated_config.get_provider_api_key(provider.id()).is_none() {
+                    println!(
+                        "\n⚠️  Note: No API key detected for {}.",
+                        provider.display_name().yellow()
+                    );
+                    println!(
+                        "   Set {} or configure [ai.providers.{}] in {}",
+                        provider.env_var().cyan(),
+                        provider.id(),
+                        saved_path.display()
+                    );
+                }
+            } else {
+                println!("{}", "Model selection cancelled.".dimmed());
+            }
+        }
+        ModelsAction::List => {
+            let active_provider = ProviderKind::parse(&config.ai.provider);
+            println!(
+                "{} (Registry v{}, updated {})",
+                "Available AI Models".bold(),
+                registry.app_version,
+                registry.updated_at
+            );
+            println!("{}", "─".repeat(72));
+
+            for &provider in ProviderKind::all() {
+                let has_key = config.get_provider_api_key(provider.id()).is_some();
+                let key_status = if has_key {
+                    "🔑 API Key Configured".green().to_string()
+                } else {
+                    format!("⚠️  Missing {}", provider.env_var())
+                        .yellow()
+                        .to_string()
+                };
+
+                println!(
+                    "\n{} ({})",
+                    provider.display_name().cyan().bold(),
+                    key_status
+                );
+
+                for m in registry.models_for(provider) {
+                    let is_active = provider == active_provider && m.id == config.ai.model;
+                    if is_active {
+                        println!(
+                            "  {} {:<28} {} {}",
+                            "❯".green().bold(),
+                            m.id.green().bold(),
+                            m.description,
+                            "[ACTIVE]".green().bold()
+                        );
+                    } else {
+                        println!("    {:<28} {}", m.id, m.description.dimmed());
+                    }
+                }
+            }
+
+            println!("\n{}", "─".repeat(72));
+            println!(
+                "Run {} to interactively switch models, or {} to refresh lists.",
+                "racoon models".cyan(),
+                "racoon models update".cyan()
+            );
+        }
+        ModelsAction::Update => {
+            println!("🔄 Updating AI model lists from provider APIs...");
+            let statuses = registry.refresh_from_remote(config, false).await;
+
+            println!();
+            for st in statuses {
+                println!(
+                    "  ✅ {:<22} {:>2} models  ({})",
+                    st.provider.display_name().bold(),
+                    st.count,
+                    st.source.dimmed()
+                );
+            }
+            println!(
+                "\n📁 Saved model registry to {}",
+                ModelsRegistry::cache_path().display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `racoon update` - check for binary updates and overwrite/refresh the AI models registry.
+async fn handle_update(config: &Config) -> Result<()> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    println!(
+        "🦝 Checking for racoon updates (current version: v{})...",
+        current_version
+    );
+
+    // 1. Check latest GitHub release version
+    let http = reqwest::Client::builder()
+        .user_agent(format!("gcp-racoon/{}", current_version))
+        .timeout(std::time::Duration::from_secs(8))
+        .build()?;
+
+    match http
+        .get("https://api.github.com/repos/Staninbui/racoon/releases/latest")
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await
+                && let Some(tag) = json.get("tag_name").and_then(|v| v.as_str())
+            {
+                let latest = tag.trim_start_matches('v');
+                if latest != current_version {
+                    println!(
+                        "✨ New version available: {} (current: v{})",
+                        tag.green().bold(),
+                        current_version
+                    );
+                    println!(
+                        "   Upgrade with: {}",
+                        "cargo install gcp-racoon --force".cyan()
+                    );
+                } else {
+                    println!("✅ Binary is already at the latest version (v{}).", current_version);
+                }
+            }
+        }
+        _ => {
+            println!(
+                "ℹ️  Could not reach GitHub releases; keeping current binary (v{}).",
+                current_version
+            );
+        }
+    }
+
+    // 2. Always overwrite and refresh the AI models registry (`reset_baseline = true`)
+    println!("\n🔄 Overwriting & refreshing AI models registry (models update)...");
+    let mut registry = ModelsRegistry::default_builtin();
+    let statuses = registry.refresh_from_remote(config, true).await;
+
+    for st in statuses {
+        println!(
+            "  ✅ {:<22} {:>2} models  ({})",
+            st.provider.display_name().bold(),
+            st.count,
+            st.source.dimmed()
+        );
+    }
+
+    println!(
+        "\n✅ Update complete! Models cache overwritten at {}",
+        ModelsRegistry::cache_path().display()
+    );
     Ok(())
 }
 
@@ -589,16 +778,15 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             println!();
 
             println!("{}", "[ai]".cyan());
-            println!(
-                "  api_key: {}",
-                config
-                    .ai
-                    .api_key
-                    .as_ref()
+            println!("  provider: {}", config.ai.provider.green().bold());
+            println!("  model: {}", config.ai.model.cyan().bold());
+            for &kind in ProviderKind::all() {
+                let key_preview = config
+                    .get_provider_api_key(kind.id())
                     .map(|k| format!("{}...", &k[..8.min(k.len())]))
-                    .unwrap_or_else(|| "(not set)".dimmed().to_string())
-            );
-            println!("  model: {}", config.ai.model);
+                    .unwrap_or_else(|| format!("(not set, use {})", kind.env_var()).dimmed().to_string());
+                println!("  {}_api_key: {}", kind.id(), key_preview);
+            }
             println!();
 
             println!("{}", "[defaults]".cyan());
@@ -627,12 +815,10 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
         ConfigAction::Edit => {
             let path = Config::default_path();
 
-            // Create when doesn't exist
             if !path.exists() {
                 Config::init()?;
             }
 
-            // Open in editor
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
 
             std::process::Command::new(&editor)

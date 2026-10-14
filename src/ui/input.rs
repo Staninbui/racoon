@@ -20,6 +20,8 @@ pub enum Action {
     AskQuestion(String),
     /// Apply or clear a GCP filter (restarts stream in live mode).
     ApplyFilter(Option<String>),
+    /// Open interactive AI provider & model selector.
+    SwitchModel,
 }
 
 /// Handle a keyboard event
@@ -157,6 +159,9 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             app.toggle_theme();
             Action::None
         }
+
+        // Switch AI model interactively
+        KeyCode::Char('m') => Action::SwitchModel,
 
         // Clear
         KeyCode::Esc => {

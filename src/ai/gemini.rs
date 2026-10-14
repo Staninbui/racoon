@@ -1,6 +1,6 @@
-//! Gemini API client implementation.
+//! Unified AI client implementation (Google Gemini, OpenAI GPT, Anthropic Claude, Agnes AI).
 //!
-//! Handles communication with Google's Gemini API for AI-powered
+//! Handles communication with multiple LLM providers for AI-powered
 //! log analysis and query generation.
 
 use reqwest::Client;
@@ -8,24 +8,28 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
+use super::models::ProviderKind;
 use super::prompts;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::utils::sanitize_query;
 
-/// Gemini API base URL.
-const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-
-/// Default model name.
-const DEFAULT_MODEL: &str = "gemini-3-flash-preview";
+/// Default model name (Google Gemini).
+const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 
 /// Errors that can occur during AI operations.
 #[derive(Error, Debug)]
 pub enum AiError {
     /// API key not found in environment or config.
     #[error(
-        "Gemini API key not found. Set GEMINI_API_KEY environment variable or configure in ~/.config/racoon/config.toml"
+        "AI API key not found. Set GEMINI_API_KEY environment variable or configure in ~/.config/racoon/config.toml"
     )]
     NoApiKey,
+
+    /// Provider-specific API key not found.
+    #[error(
+        "{provider} API key not found. Set {env_var} environment variable or configure [ai.providers] in ~/.config/racoon/config.toml"
+    )]
+    NoApiKeyForProvider { provider: String, env_var: String },
 
     /// HTTP request failed.
     #[error("HTTP request failed: {0}")]
@@ -36,7 +40,7 @@ pub enum AiError {
     ParseError(String),
 
     /// API returned an error.
-    #[error("Gemini API error: {0}")]
+    #[error("AI API error: {0}")]
     ApiError(String),
 
     /// Rate limit exceeded.
@@ -44,7 +48,7 @@ pub enum AiError {
     RateLimited,
 
     /// Invalid API key.
-    #[error("Invalid API key. Check your GEMINI_API_KEY.")]
+    #[error("Invalid API key. Check your configured API key.")]
     InvalidApiKey,
 }
 
@@ -70,88 +74,99 @@ pub enum UserIntent {
     GenerateQuery { query: String },
 }
 
-/// Client for interacting with Google's Gemini API.
+/// Unified AI client supporting Google Gemini, OpenAI GPT, Anthropic Claude, and Agnes AI.
 ///
-/// Provides methods for log explanation and query generation.
+/// Named `GeminiClient` (with alias `AiClient`) for backward compatibility across the crate.
 #[derive(Clone)]
 pub struct GeminiClient {
     /// HTTP client for API requests
     http: Client,
-    /// Gemini API key
+    /// Active AI provider
+    provider: ProviderKind,
+    /// Provider API key
     api_key: String,
     /// Model name to use
     model: String,
+    /// Base URL for the provider API
+    base_url: String,
 }
 
+/// Alias for `GeminiClient` representing the multi-provider AI client.
+pub type AiClient = GeminiClient;
+
 impl GeminiClient {
-    /// Create a new GeminiClient with the provided API key.
-    ///
-    /// # Arguments
-    ///
-    /// * `api_key` - The Gemini API key
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use gcp_racoon::ai::GeminiClient;
-    ///
-    /// let client = GeminiClient::new("your-api-key".to_string());
-    /// ```
+    /// Create a new client using the default Google Gemini provider and model.
     pub fn new(api_key: String) -> Self {
         Self::with_model(api_key, DEFAULT_MODEL.to_string())
     }
 
-    /// Create a new GeminiClient with a specific model.
+    /// Create a new Google Gemini client with a specific model.
     pub fn with_model(api_key: String, model: String) -> Self {
+        Self::with_provider_and_model(ProviderKind::Google, api_key, model, None)
+    }
+
+    /// Create a client for any supported provider, model, and optional custom base URL.
+    pub fn with_provider_and_model(
+        provider: ProviderKind,
+        api_key: String,
+        model: String,
+        base_url: Option<String>,
+    ) -> Self {
+        let resolved_base_url = base_url
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or_else(|| provider.default_base_url().to_string());
         Self {
             http: Client::new(),
+            provider,
             api_key,
             model,
+            base_url: resolved_base_url,
         }
     }
 
-    /// Create a GeminiClient from environment variable or config file.
-    ///
-    /// Looks for the API key in the following order:
-    /// 1. `GEMINI_API_KEY` environment variable
-    /// 2. `~/.config/racoon/config.toml` file
-    ///
-    /// # Errors
-    ///
-    /// Returns `AiError::NoApiKey` if no API key is found.
+    /// Return the active provider.
+    pub fn provider(&self) -> ProviderKind {
+        self.provider
+    }
+
+    /// Return the active model identifier.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Create a client from environment variable or config file.
     pub fn from_env() -> Result<Self, AiError> {
+        let config = crate::config::Config::load();
+        if let Ok(client) = Self::from_config(&config) {
+            return Ok(client);
+        }
         let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| AiError::NoApiKey)?;
         Ok(Self::new(api_key))
     }
 
-    /// Create client from config (checks env var first, then config file).
+    /// Create client from config (checks provider-specific env var first, then config file).
     pub fn from_config(config: &crate::config::Config) -> Result<Self, AiError> {
-        let api_key = config.get_api_key().ok_or(AiError::NoApiKey)?;
+        let provider = ProviderKind::parse(&config.ai.provider);
+        let api_key = config
+            .get_provider_api_key(provider.id())
+            .ok_or_else(|| AiError::NoApiKeyForProvider {
+                provider: provider.display_name().to_string(),
+                env_var: provider.env_var().to_string(),
+            })?;
         let model = config.ai.model.clone();
-        Ok(Self::with_model(api_key, model))
+        let base_url = config.get_provider_base_url(provider.id());
+        Ok(Self::with_provider_and_model(
+            provider, api_key, model, base_url,
+        ))
     }
 
-    /// Check if an API key is available.
-    ///
-    /// This is a quick check without actually validating the key.
+    /// Check if an API key is available for the active or default provider.
     pub fn is_available() -> bool {
-        get_api_key().is_some()
+        let config = crate::config::Config::load();
+        config.get_api_key().is_some() || get_api_key().is_some()
     }
 
     /// Explain a log entry using AI.
-    ///
-    /// Analyzes the log entry and provides:
-    /// - What the log entry means
-    /// - Potential impact
-    /// - Suggested troubleshooting steps (for errors)
-    ///
-    /// # Arguments
-    ///
-    /// * `entry` - The log entry to explain
-    ///
-    /// # Returns
-    ///
-    /// A human-readable explanation of the log entry.
     pub async fn explain_log(&self, entry: &LogEntry) -> Result<String, AiError> {
         let log_json =
             serde_json::to_string_pretty(entry).map_err(|e| AiError::ParseError(e.to_string()))?;
@@ -159,6 +174,8 @@ impl GeminiClient {
         let prompt = prompts::explain_log_prompt(&log_json);
 
         debug!(
+            provider = self.provider.id(),
+            model = %self.model,
             "Explaining log entry: {}",
             entry.insert_id.as_deref().unwrap_or("unknown")
         );
@@ -188,13 +205,15 @@ Response:"#,
         let response = self.generate(&prompt).await?;
 
         // Parse JSON response
-        let json: serde_json::Value = serde_json::from_str(
-            response
-                .trim()
-                .trim_start_matches("```json")
-                .trim_end_matches("```"),
-        )
-        .map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
+        let cleaned = response
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        let json: serde_json::Value = serde_json::from_str(cleaned)
+            .map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
 
         let intent_type = json["intent"].as_str().unwrap_or("QUESTION");
         let gcp_query = json["gcp_query"].as_str().unwrap_or("").to_string();
@@ -213,29 +232,6 @@ Response:"#,
     }
 
     /// Generate a GCP Logging query from natural language.
-    ///
-    /// Converts a natural language description into a valid GCP
-    /// Logging query string.
-    ///
-    /// # Arguments
-    ///
-    /// * `description` - Natural language description of what to search for
-    ///
-    /// # Returns
-    ///
-    /// A GCP Logging query string.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use gcp_racoon::ai::GeminiClient;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = GeminiClient::from_env()?;
-    /// let query = client.generate_query("errors from Cloud Run in the last hour").await?;
-    /// // Returns something like: resource.type="cloud_run_revision" severity>=ERROR timestamp>="2024-01-01T00:00:00Z"
-    /// # Ok(())
-    /// # }
-    /// ```
     pub async fn generate_query(&self, description: &str) -> Result<String, AiError> {
         let prompt = prompts::generate_query_prompt(description);
 
@@ -257,17 +253,6 @@ Response:"#,
     }
 
     /// Analyze multiple related logs for root cause.
-    ///
-    /// Looks at a set of logs and tries to identify the root cause
-    /// of any issues. Limited to 10 logs to avoid token limits.
-    ///
-    /// # Arguments
-    ///
-    /// * `entries` - The log entries to analyze (should be related/sequential)
-    ///
-    /// # Returns
-    ///
-    /// An analysis of the logs including potential root cause.
     pub async fn analyze_logs(&self, entries: &[LogEntry]) -> Result<String, AiError> {
         if entries.is_empty() {
             return Ok("No logs to analyze.".to_string());
@@ -276,7 +261,7 @@ Response:"#,
         // Serialize logs (limit to avoid token limits)
         let logs_json: Vec<String> = entries
             .iter()
-            .take(10) // Limit to 10 logs to avoid token limits
+            .take(10)
             .filter_map(|e| serde_json::to_string(e).ok())
             .collect();
 
@@ -288,12 +273,6 @@ Response:"#,
     }
 
     /// Ask a question about the logs and get a human-readable answer.
-    ///
-    /// This method performs a complete Q&A flow:
-    /// 1. Generates a GCP Logging query based on the question
-    /// 2. Fetches matching logs from GCP
-    /// 3. Analyzes the logs with AI
-    /// 4. Returns a human-readable answer
     pub async fn ask_question(
         &self,
         question: &str,
@@ -312,7 +291,6 @@ Response:"#,
             Ok(entries) => entries,
             Err(e) => {
                 tracing::warn!(error = %e, "Query failed, trying fallback");
-                // If the AI-generated query fails, try a simpler fallback
                 let fallback_filter = LogFilter::new()
                     .severity_min("WARNING")
                     .since(chrono::Duration::hours(24));
@@ -342,13 +320,12 @@ Response:"#,
         question: &str,
         entries: &[LogEntry],
     ) -> Result<String, AiError> {
-        // Format logs for the prompt
         let logs_summary = if entries.is_empty() {
             "No matching logs found.".to_string()
         } else {
             entries
                 .iter()
-                .take(20) // Limit to avoid token limits
+                .take(20)
                 .map(|e| {
                     format!(
                         "[{}] [{}] {}",
@@ -398,8 +375,6 @@ Your answer:"#,
     }
 
     /// Quick check for errors in a time range.
-    ///
-    /// Convenience method for common "are there any errors?" questions.
     pub async fn check_for_errors(
         &self,
         logs_client: &LogsClient,
@@ -413,18 +388,24 @@ Your answer:"#,
         self.ask_question(&question, logs_client).await
     }
 
-    /// Generate content using the Gemini API.
-    ///
-    /// This is the core method that sends prompts to Gemini.
-    /// The default generation config setting are
-    /// - temperature: 0.3
-    /// - max_output_tokens: 1024
-    /// - top_p: 0.8
-    /// - top_k: 40
+    /// Generate content using the configured AI provider (`Google`, `OpenAi`, `Anthropic`, or `Agnes`).
     async fn generate(&self, prompt: &str) -> Result<String, AiError> {
+        match self.provider {
+            ProviderKind::Google => self.generate_google(prompt).await,
+            ProviderKind::OpenAi | ProviderKind::Agnes => {
+                self.generate_openai_compatible(prompt).await
+            }
+            ProviderKind::Anthropic => self.generate_anthropic(prompt).await,
+        }
+    }
+
+    /// Generate content via Google Gemini REST API (`generateContent`).
+    async fn generate_google(&self, prompt: &str) -> Result<String, AiError> {
         let url = format!(
             "{}/{}:generateContent?key={}",
-            GEMINI_API_BASE, self.model, self.api_key
+            self.base_url.trim_end_matches('/'),
+            self.model,
+            self.api_key
         );
 
         let request_body = GeminiRequest {
@@ -434,7 +415,7 @@ Your answer:"#,
                 }],
             }],
             generation_config: Some(GenerationConfig {
-                temperature: Some(0.3), // Lower temperature for more consistent output
+                temperature: Some(0.3),
                 max_output_tokens: Some(1024),
                 top_p: Some(0.8),
                 top_k: Some(40),
@@ -442,10 +423,8 @@ Your answer:"#,
         };
 
         let response = self.http.post(&url).json(&request_body).send().await?;
-
         let status = response.status();
 
-        // Handle specific error codes
         if status == 429 {
             return Err(AiError::RateLimited);
         }
@@ -469,13 +448,11 @@ Your answer:"#,
             )));
         }
 
-        // Parse response
         let response_body: GeminiResponse = response
             .json()
             .await
             .map_err(|e| AiError::ParseError(e.to_string()))?;
 
-        // Extract text from response
         let text = response_body
             .candidates
             .first()
@@ -485,25 +462,124 @@ Your answer:"#,
 
         Ok(text)
     }
+
+    /// Generate content via OpenAI-compatible `/chat/completions` (used by OpenAI and Agnes AI).
+    async fn generate_openai_compatible(&self, prompt: &str) -> Result<String, AiError> {
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let request_body = OpenAiChatRequest {
+            model: self.model.clone(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
+            temperature: Some(0.3),
+            max_tokens: Some(1024),
+        };
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == 429 {
+            return Err(AiError::RateLimited);
+        }
+        if status == 401 || status == 403 {
+            return Err(AiError::InvalidApiKey);
+        }
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(AiError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let response_body: OpenAiChatResponse = response
+            .json()
+            .await
+            .map_err(|e| AiError::ParseError(e.to_string()))?;
+
+        let text = response_body
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .ok_or_else(|| AiError::ParseError("No choices in response".to_string()))?;
+
+        Ok(text)
+    }
+
+    /// Generate content via Anthropic `/messages` API.
+    async fn generate_anthropic(&self, prompt: &str) -> Result<String, AiError> {
+        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
+
+        let request_body = AnthropicMessagesRequest {
+            model: self.model.clone(),
+            max_tokens: 1024,
+            temperature: Some(0.3),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            }],
+        };
+
+        let response = self
+            .http
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&request_body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if status == 429 {
+            return Err(AiError::RateLimited);
+        }
+        if status == 401 || status == 403 {
+            return Err(AiError::InvalidApiKey);
+        }
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(AiError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let response_body: AnthropicMessagesResponse = response
+            .json()
+            .await
+            .map_err(|e| AiError::ParseError(e.to_string()))?;
+
+        let text = response_body
+            .content
+            .iter()
+            .find_map(|b| b.text.clone())
+            .ok_or_else(|| AiError::ParseError("No text content in response".to_string()))?;
+
+        Ok(text)
+    }
 }
 
-/// Get API key from environment or config file.
+/// Get API key from environment or config file (legacy helper).
 fn get_api_key() -> Option<String> {
-    // 1. Try environment variable first
     if let Ok(key) = std::env::var("GEMINI_API_KEY")
         && !key.is_empty()
     {
-        debug!("Using API key from GEMINI_API_KEY environment variable");
         return Some(key);
     }
 
-    // 2. Try config file
     let config_path = dirs::config_dir()?.join("racoon/config.toml");
 
     if config_path.exists()
         && let Ok(content) = std::fs::read_to_string(&config_path)
     {
-        // Simple TOML parsing for api_key = "..."
         for line in content.lines() {
             let line = line.trim();
             if (line.starts_with("gemini_api_key") || line.starts_with("api_key"))
@@ -511,7 +587,6 @@ fn get_api_key() -> Option<String> {
             {
                 let key = value.trim().trim_matches('"').trim_matches('\'');
                 if !key.is_empty() {
-                    debug!("Using API key from {:?}", config_path);
                     return Some(key.to_string());
                 }
             }
@@ -522,9 +597,9 @@ fn get_api_key() -> Option<String> {
 }
 
 // ============================================================================
-// Gemini API Request/Response types
+// Provider API Request/Response types
 // ============================================================================
-/// Request body for Gemini API.
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiRequest {
@@ -533,19 +608,16 @@ struct GeminiRequest {
     generation_config: Option<GenerationConfig>,
 }
 
-/// Content block in Gemini request/response.
 #[derive(Debug, Serialize, Deserialize)]
 struct Content {
     parts: Vec<Part>,
 }
 
-/// Part of content (text).
 #[derive(Debug, Serialize, Deserialize)]
 struct Part {
     text: String,
 }
 
-/// Generation configuration for Gemini.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerationConfig {
@@ -559,21 +631,61 @@ struct GenerationConfig {
     top_k: Option<u32>,
 }
 
-/// Response from Gemini API.
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     candidates: Vec<Candidate>,
 }
 
-/// Candidate response from Gemini.
 #[derive(Debug, Deserialize)]
 struct Candidate {
     content: Content,
 }
 
-// ============================================================================
-// Helper functions (outside impl block)
-// ============================================================================
+#[derive(Debug, Serialize, Deserialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAiChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChatResponse {
+    choices: Vec<OpenAiChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiChoice {
+    message: ChatMessage,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessagesRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    messages: Vec<ChatMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicMessagesResponse {
+    content: Vec<AnthropicContentBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContentBlock {
+    #[serde(default)]
+    text: Option<String>,
+}
 
 /// Try to fetch logs with the given query, handling errors gracefully.
 async fn fetch_logs_with_fallback(
@@ -587,10 +699,6 @@ async fn fetch_logs_with_fallback(
         .map_err(|e| e.to_string())
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,11 +707,24 @@ mod tests {
     fn test_client_creation() {
         let client = GeminiClient::new("test-key".to_string());
         assert_eq!(client.api_key, "test-key");
+        assert_eq!(client.provider(), ProviderKind::Google);
+    }
+
+    #[test]
+    fn test_multi_provider_client_creation() {
+        let client = GeminiClient::with_provider_and_model(
+            ProviderKind::Agnes,
+            "agnes-key".to_string(),
+            "agnes-3.0-pro".to_string(),
+            None,
+        );
+        assert_eq!(client.provider(), ProviderKind::Agnes);
+        assert_eq!(client.model(), "agnes-3.0-pro");
+        assert_eq!(client.base_url, "https://apihub.agnes-ai.com/v1");
     }
 
     #[test]
     fn test_is_available_without_key() {
-        // This test depends on environment; just ensure it doesn't panic
         let _ = GeminiClient::is_available();
     }
 

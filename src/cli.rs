@@ -46,6 +46,13 @@ pub enum Commands {
 
     /// Manage configuration
     Config(ConfigArgs),
+
+    /// Select, list, or update AI models (Google, OpenAI, Anthropic, Agnes AI)
+    #[command(visible_alias = "model")]
+    Models(ModelsArgs),
+
+    /// Check for racoon updates and refresh/overwrite the AI models registry
+    Update,
 }
 
 /// the arguments for tail command
@@ -215,6 +222,29 @@ pub enum ConfigAction {
     Edit,
 }
 
+/// Arguments for `racoon models` command.
+#[derive(Parser, Debug)]
+pub struct ModelsArgs {
+    /// Action to perform (defaults to interactive model selector if omitted)
+    #[command(subcommand)]
+    pub action: Option<ModelsAction>,
+}
+
+/// Subcommands for `racoon models`.
+#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelsAction {
+    /// Interactively select AI provider and model using arrow keys (default)
+    #[command(visible_alias = "use", visible_alias = "switch")]
+    Select,
+
+    /// List all available providers and models
+    List,
+
+    /// Manually update model lists from remote provider APIs
+    #[command(visible_alias = "refresh")]
+    Update,
+}
+
 #[derive(ValueEnum, Clone, Debug)]
 pub enum Severity {
     Debug,
@@ -281,5 +311,29 @@ mod tests {
             }
             _ => panic!("Expected Query command"),
         }
+    }
+
+    #[test]
+    fn test_models_and_update_commands() {
+        // `racoon models` without arguments defaults to None (interactive selector)
+        let cli = Cli::try_parse_from(["racoon", "models"]).unwrap();
+        assert!(matches!(cli.command, Commands::Models(ModelsArgs { action: None })));
+
+        // `racoon models select` does not accept model name arguments
+        let err = Cli::try_parse_from(["racoon", "models", "select", "gpt-4o"]);
+        assert!(err.is_err());
+
+        // `racoon models update`
+        let cli_update = Cli::try_parse_from(["racoon", "models", "update"]).unwrap();
+        assert!(matches!(
+            cli_update.command,
+            Commands::Models(ModelsArgs {
+                action: Some(ModelsAction::Update)
+            })
+        ));
+
+        // `racoon update`
+        let root_update = Cli::try_parse_from(["racoon", "update"]).unwrap();
+        assert!(matches!(root_update.command, Commands::Update));
     }
 }

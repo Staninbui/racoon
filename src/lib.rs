@@ -1,13 +1,14 @@
 //! racoon - GCP Log Spy with AI superpowers 🦝
 //!
 //! This crate provides real-time GCP log streaming, AI-powered analysis,
-//! and natural language query generation capabilities.
+//! and natural language query generation capabilities across multiple AI providers
+//! (Google Gemini, OpenAI GPT, Anthropic Claude, and Agnes AI).
 //!
 //! # Modules
 //!
 //! - [`cli`]: Command-line interface definitions using clap.
 //! - [`gcp`]: Google Cloud Platform integration (auth, logging).
-//! - [`ai`]: AI-powered log analysis and query generation.
+//! - [`ai`]: Multi-provider AI log analysis, model registry, and query generation.
 //! - [`storage`]: Log storage and export functionality.
 //! - [`ui`]: User interface for log streaming and analysis.
 //! - [`error`]: Application-level error types.
@@ -39,7 +40,7 @@ pub mod ui;
 pub mod utils;
 
 // Re-exports
-pub use ai::GeminiClient;
+pub use ai::{AiClient, GeminiClient, ModelInfo, ModelsRegistry, ProviderKind};
 pub use config::Config;
 pub use error::{RacoonError, Result};
 pub use gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
