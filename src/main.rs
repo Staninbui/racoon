@@ -6,9 +6,12 @@
 //! - Dispatch to appropriate command handlers
 //! - Handle top-level errors gracefully
 
+use std::io::IsTerminal;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
+use tokio::sync::mpsc;
 use tracing::{Level, error, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
@@ -24,6 +27,7 @@ use gcp_racoon::storage::{
 };
 use gcp_racoon::ui::theme::Theme;
 use gcp_racoon::ui::{App, run_app};
+use gcp_racoon::utils::sanitize_query;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,11 +37,25 @@ async fn main() -> Result<()> {
     // load config
     let config = Config::load();
 
-    // initialize tracing
-    let log_level = config.logging.level.clone();
-    init_tracing(&log_level)?;
+    // Determine whether this command will enter interactive TUI mode
+    let is_tui = match &cli.command {
+        Commands::Tail(_) => true,
+        Commands::View(args) => !args.json && !args.no_tui && std::io::stdout().is_terminal(),
+        _ => false,
+    };
 
-    info!("racoon staring up 🦝");
+    // CLI --log-level overrides config.logging.level
+    let log_level = cli
+        .log_level
+        .as_deref()
+        .unwrap_or(&config.logging.level)
+        .to_string();
+
+    // Suppress tracing output during interactive TUI so terminal buffer isn't corrupted
+    if !is_tui {
+        init_tracing(&log_level)?;
+        info!("racoon starting up 🦝");
+    }
 
     // Dispatch to command handlers
     let result = match cli.command {
@@ -47,7 +65,7 @@ async fn main() -> Result<()> {
         Commands::Download(args) => handle_download(args, &config).await,
         Commands::Query(args) => handle_query(args, &config).await,
         Commands::Export(args) => handle_export(args, &config).await,
-        Commands::View(args) => handle_view(args).await,
+        Commands::View(args) => handle_view(args, &config).await,
         Commands::Config(args) => handle_config(args),
     };
 
@@ -59,22 +77,28 @@ async fn main() -> Result<()> {
     result
 }
 
-/// initialize tracing
-fn init_tracing(level: &str) -> Result<()> {
-    let level = match level.to_lowercase().as_str() {
+/// Parse log level string into `tracing::Level`.
+fn parse_log_level(level: &str) -> Level {
+    match level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
         "info" => Level::INFO,
         "warn" | "warning" => Level::WARN,
         "error" => Level::ERROR,
         _ => {
-            eprint!("Unknown log level '{}', defaulting to 'info'", level);
+            eprintln!("Unknown log level '{}', defaulting to 'info'", level);
             Level::INFO
         }
-    };
+    }
+}
+
+/// initialize tracing (writes to stderr so stdout JSON output stays clean)
+fn init_tracing(level: &str) -> Result<()> {
+    let level = parse_log_level(level);
 
     let subscriber = FmtSubscriber::builder()
         .with_max_level(level)
+        .with_writer(std::io::stderr)
         .with_target(false)
         .with_thread_ids(false)
         .with_file(false)
@@ -130,17 +154,28 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     let client = LogsClient::new(auth.clone(), project.clone());
 
     let mut filter = LogFilter::new().since(duration);
+    let mut ui_filter_parts: Vec<String> = Vec::new();
 
     if let Some(ref f) = args.filter {
         filter = filter.raw(f);
+        ui_filter_parts.push(f.clone());
     }
 
     if let Some(ref sev) = args.severity {
-        filter = filter.severity_min(&format!("{:?}", sev).to_uppercase());
+        let sev_str = format!("{:?}", sev).to_uppercase();
+        filter = filter.severity_min(&sev_str);
+        ui_filter_parts.push(format!("severity>={}", sev_str));
+    } else if let Some(ref default_sev) = config.defaults.severity
+        && args.filter.is_none()
+    {
+        let sev_str = default_sev.to_uppercase();
+        filter = filter.severity_min(&sev_str);
+        ui_filter_parts.push(format!("severity>={}", sev_str));
     }
 
     if let Some(ref res) = args.resource {
         filter = filter.resource_type(res);
+        ui_filter_parts.push(format!("resource.type=\"{}\"", res));
     }
 
     info!("Filter: {}", filter.build());
@@ -148,8 +183,17 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     // Start streaming
     let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
 
-    // Create app state
-    let app = App::new(project.clone()).with_theme(theme);
+    let initial_ui_filter = if ui_filter_parts.is_empty() {
+        None
+    } else {
+        Some(ui_filter_parts.join(" "))
+    };
+
+    // Create app state with config settings
+    let app = App::new(project.clone())
+        .with_theme(theme)
+        .with_max_logs(config.ui.max_logs)
+        .with_filter(initial_ui_filter);
 
     // Run TUI
     run_app(app, rx, gemini, Some(client)).await?;
@@ -301,7 +345,9 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
         .or_else(|| config.defaults.project.clone())
         .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
 
-    let _since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
+    let since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
+    let duration = gcp_racoon::parse_duration_chrono(since_str)
+        .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
@@ -314,15 +360,48 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
         .await
         .context("GCP credentials verification failed")?;
 
-    println!("✅ Authentication successful!");
+    if !args.json {
+        println!("✅ Authentication successful!");
+    }
 
     let client = LogsClient::new(auth, project.clone());
 
-    // Build filter
-    let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
+    // Build filter starting with --since duration
+    let mut filter = LogFilter::new().since(duration);
+
+    if let Some(ref ai_prompt) = args.ai {
+        let gemini =
+            GeminiClient::from_config(config).context("AI query requires GEMINI_API_KEY")?;
+
+        if !args.json {
+            println!("🦝 Generating query for: \"{}\"", ai_prompt);
+        }
+
+        let raw_query = gemini
+            .generate_query(ai_prompt)
+            .await
+            .context("Failed to generate query with AI")?;
+        let clean_query = sanitize_query(&raw_query);
+
+        if !args.json {
+            println!("📋 Generated filter: {}", clean_query);
+        }
+
+        // If AI generated its own timestamp constraint, use raw query directly;
+        // otherwise combine with our since filter.
+        if clean_query.contains("timestamp") {
+            filter = LogFilter::new().raw(&clean_query);
+        } else {
+            filter = filter.raw(&clean_query);
+        }
+    } else if let Some(ref f) = args.filter {
+        filter = filter.raw(f);
+    } else if let Some(ref default_sev) = config.defaults.severity {
+        filter = filter.severity_min(&default_sev.to_uppercase());
+    }
 
     // Fetch logs
-    let entries = client.list_entries(filter.as_ref(), limit).await?;
+    let entries = client.list_entries(Some(&filter), limit).await?;
 
     if args.json {
         // JSON output
@@ -353,26 +432,43 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
 }
 
 /// Handle `racoon view` - view logs from local file
-async fn handle_view(args: ViewArgs) -> Result<()> {
-    println!("📂 Loading logs from: {}", args.file);
+async fn handle_view(args: ViewArgs, config: &Config) -> Result<()> {
+    if !args.json {
+        println!("📂 Loading logs from: {}", args.file);
+    }
 
     let result = import_logs(&args.file).context("Failed to import logs")?;
 
-    println!("   Format: {}", result.format.name());
-    println!("   Loaded: {} entries", result.count);
+    if !args.json {
+        println!("   Format: {}", result.format.name());
+        println!("   Loaded: {} entries", result.count);
 
-    if result.errors > 0 {
-        println!("   ⚠️  {} entries failed to parse", result.errors);
+        if result.errors > 0 {
+            println!("   ⚠️  {} entries failed to parse", result.errors);
+        }
     }
 
     if args.json {
         // Output as JSON
-        println!();
-        println!("{}", serde_json::to_string_pretty(&result.entries)?);
+        let entries_to_show: Vec<_> = result.entries.into_iter().take(args.limit).collect();
+        println!("{}", serde_json::to_string_pretty(&entries_to_show)?);
     } else if result.entries.is_empty() {
         println!("\n(no entries to display)");
+    } else if !args.no_tui && std::io::stdout().is_terminal() {
+        // Launch interactive TUI in offline mode
+        let entries_to_show: Vec<_> = result.entries.into_iter().take(args.limit).collect();
+        let theme = Theme::parse(&config.ui.theme);
+        let gemini = GeminiClient::from_config(config).ok();
+
+        let (_tx, rx) = mpsc::channel(1);
+        let app = App::new(format!("file:{}", args.file))
+            .with_theme(theme)
+            .with_max_logs(config.ui.max_logs.max(entries_to_show.len()))
+            .with_offline_logs(entries_to_show);
+
+        run_app(app, rx, gemini, None).await?;
     } else {
-        // Display in terminal
+        // Display in terminal (when --no-tui or piped)
         println!();
 
         let entries_to_show = result.entries.iter().take(args.limit);
@@ -512,12 +608,20 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             );
             println!("  since: {}", config.defaults.since);
             println!("  limit: {}", config.defaults.limit);
+            println!(
+                "  severity: {}",
+                config.defaults.severity.as_deref().unwrap_or("(not set)")
+            );
             println!();
 
             println!("{}", "[ui]".cyan());
             println!("  max_logs: {}", config.ui.max_logs);
             println!("  mouse: {}", config.ui.mouse);
             println!("  theme: {}", config.ui.theme);
+            println!();
+
+            println!("{}", "[logging]".cyan());
+            println!("  level: {}", config.logging.level);
         }
 
         ConfigAction::Edit => {
@@ -546,32 +650,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_init_tracing_valid_levels() {
-        // Test various valid log levels
-        // Note: We can only set the global subscriber once, so we test parsing logic
-        let valid_levels = [
-            "trace", "debug", "info", "warn", "warning", "error", "INFO", "DEBUG",
-        ];
-
-        for level in valid_levels {
-            let parsed = match level.to_lowercase().as_str() {
-                "trace" => Level::TRACE,
-                "debug" => Level::DEBUG,
-                "info" => Level::INFO,
-                "warn" | "warning" => Level::WARN,
-                "error" => Level::ERROR,
-                _ => Level::INFO,
-            };
-
-            // Just verify parsing doesn't panic and returns expected level
-            match level.to_lowercase().as_str() {
-                "trace" => assert_eq!(parsed, Level::TRACE),
-                "debug" => assert_eq!(parsed, Level::DEBUG),
-                "info" => assert_eq!(parsed, Level::INFO),
-                "warn" | "warning" => assert_eq!(parsed, Level::WARN),
-                "error" => assert_eq!(parsed, Level::ERROR),
-                _ => {}
-            }
-        }
+    fn test_parse_log_level_valid_levels() {
+        assert_eq!(parse_log_level("trace"), Level::TRACE);
+        assert_eq!(parse_log_level("debug"), Level::DEBUG);
+        assert_eq!(parse_log_level("info"), Level::INFO);
+        assert_eq!(parse_log_level("warn"), Level::WARN);
+        assert_eq!(parse_log_level("warning"), Level::WARN);
+        assert_eq!(parse_log_level("error"), Level::ERROR);
+        assert_eq!(parse_log_level("INFO"), Level::INFO);
+        assert_eq!(parse_log_level("DEBUG"), Level::DEBUG);
+        assert_eq!(parse_log_level("unknown"), Level::INFO);
     }
 }

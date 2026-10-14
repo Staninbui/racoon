@@ -18,6 +18,8 @@ pub enum Action {
     GenerateQuery(String),
     /// Request AI question generation.
     AskQuestion(String),
+    /// Apply or clear a GCP filter (restarts stream in live mode).
+    ApplyFilter(Option<String>),
 }
 
 /// Handle a keyboard event
@@ -158,10 +160,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
 
         // Clear
         KeyCode::Esc => {
+            let had_filter = app.filter.is_some();
             app.clear_search();
             app.clear_ai_response();
-            app.filter = None;
-            Action::None
+            app.set_filter(None);
+            if had_filter {
+                Action::ApplyFilter(None)
+            } else {
+                Action::None
+            }
         }
 
         _ => Action::None,
@@ -187,8 +194,8 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
 
             match mode {
                 InputMode::Filter => {
-                    app.filter = Some(text);
-                    Action::None
+                    app.set_filter(Some(text.clone()));
+                    Action::ApplyFilter(Some(text))
                 }
                 InputMode::AiQuery => {
                     // Return action for AI processing
@@ -231,6 +238,7 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gcp::LogEntry;
 
     fn make_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
@@ -279,6 +287,27 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_submission_and_clear_triggers_action() {
+        let mut app = App::new("test".to_string());
+
+        handle_key_event(&mut app, make_key(KeyCode::Char('f')));
+        assert_eq!(app.input_mode, InputMode::Filter);
+
+        for c in "severity>=ERROR".chars() {
+            handle_key_event(&mut app, make_key(KeyCode::Char(c)));
+        }
+
+        let action = handle_key_event(&mut app, make_key(KeyCode::Enter));
+        assert!(matches!(action, Action::ApplyFilter(Some(ref f)) if f == "severity>=ERROR"));
+        assert_eq!(app.filter.as_deref(), Some("severity>=ERROR"));
+
+        // Pressing Esc in Normal mode clears the filter and triggers ApplyFilter(None)
+        let clear_action = handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(clear_action, Action::ApplyFilter(None)));
+        assert!(app.filter.is_none());
+    }
+
+    #[test]
     fn test_explain_requires_ai() {
         let mut app = App::new("test".to_string());
         app.add_log(LogEntry::default());
@@ -293,6 +322,4 @@ mod tests {
         let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
         assert!(matches!(action, Action::ExplainLog));
     }
-
-    use crate::gcp::LogEntry;
 }

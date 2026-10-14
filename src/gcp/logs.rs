@@ -293,6 +293,10 @@ impl LogsClient {
                         debug!("Stream stopped by handle");
                         break;
                     }
+                    _ = tx.closed() => {
+                        debug!("Receiver dropped, stopping stream");
+                        break;
+                    }
                     _ = interval.tick() => {
                         // Build filter with timestamp constraint
                         let mut poll_filter = filter.clone().unwrap_or_default();

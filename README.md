@@ -243,7 +243,7 @@ Config file location: `~/.config/racoon/config.toml`
 # AI Settings
 [ai]
 api_key = "your-gemini-api-key"
-model = "gemini-2.0-flash"
+model = "gemini-3-flash-preview"
 
 # Default Values
 [defaults]

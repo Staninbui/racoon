@@ -12,9 +12,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
-    /// Global log level
-    #[arg(short, long, global = true, default_value = "info")]
-    pub log_level: String,
+    /// Global log level (overrides config file when specified)
+    #[arg(short, long, global = true)]
+    pub log_level: Option<String>,
 
     #[command(subcommand)]
     pub command: Commands,
@@ -118,6 +118,12 @@ pub struct QueryArgs {
     #[arg(short, long)]
     pub filter: Option<String>,
 
+    /// Use AI to generate filter from natural language
+    ///
+    /// for example: --ai "all errors from Cloud Run today"
+    #[arg(long)]
+    pub ai: Option<String>,
+
     /// time range of logs (e.g., 30s, 5m, 1h, 2d)
     #[arg(long)]
     pub since: Option<String>,
@@ -144,6 +150,10 @@ pub struct ViewArgs {
     /// Output as JSON instead of TUI
     #[arg(long)]
     pub json: bool,
+
+    /// Print logs to stdout instead of launching interactive TUI
+    #[arg(long)]
+    pub no_tui: bool,
 }
 
 /// Arguments for `racoon export` command.
@@ -248,5 +258,28 @@ mod tests {
     fn test_severity_to_filter() {
         assert_eq!(Severity::Debug.to_filter(), "severity>=DEBUG");
         assert_eq!(Severity::Warning.to_filter(), "severity>=WARNING");
+    }
+
+    #[test]
+    fn test_query_args_ai_flag() {
+        let cli = Cli::try_parse_from([
+            "racoon",
+            "query",
+            "--project",
+            "demo-proj",
+            "--ai",
+            "errors in last hour",
+            "--since",
+            "2h",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Query(args) => {
+                assert_eq!(args.project.as_deref(), Some("demo-proj"));
+                assert_eq!(args.ai.as_deref(), Some("errors in last hour"));
+                assert_eq!(args.since.as_deref(), Some("2h"));
+            }
+            _ => panic!("Expected Query command"),
+        }
     }
 }

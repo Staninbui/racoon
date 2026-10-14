@@ -20,7 +20,7 @@
 //! async fn main() -> anyhow::Result<()> {
 //!     let (tx, rx) = mpsc::channel::<LogEntry>(256);
 //!     let app = App::new("my-project".to_string());
-//!     run_app(app, rx).await?;
+//!     run_app(app, rx, None, None).await?;
 //!     Ok(())
 //! }
 //! ```
@@ -41,8 +41,9 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc;
 
 use crate::ai::{GeminiClient, UserIntent};
-use crate::gcp::{LogEntry, LogsClient};
+use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::ui::theme::Theme;
+use crate::utils::sanitize_query;
 use widgets::{render_ai_pane, render_detail_pane, render_input_bar, render_log_list};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
@@ -52,8 +53,11 @@ type Term = Terminal<CrosstermBackend<io::Stdout>>;
 pub enum AiRequest {
     /// Explain a single log entry.
     ExplainLog(Box<LogEntry>),
-    /// Ask a question and get an analyzed answer.
-    AskQuestion(String),
+    /// Ask a question and get an analyzed answer (includes current buffered logs for offline fallback).
+    AskQuestion {
+        question: String,
+        local_logs: Vec<LogEntry>,
+    },
 }
 
 /// AI response from the background worker.
@@ -82,6 +86,8 @@ pub enum AiResponse {
 ///
 /// * `app` - The application state
 /// * `log_rx` - Channel receiver for incoming log entries
+/// * `gemini` - Optional Gemini AI client
+/// * `logs_client` - Optional GCP Logs client (present in live `tail` mode, `None` in offline `view` mode)
 ///
 /// # Returns
 ///
@@ -99,7 +105,7 @@ pub async fn run_app(
     // Spawn AI worker task if Gemini is available
     if let Some(client) = gemini {
         let ai_tx_clone = ai_tx.clone();
-        let logs_client = logs_client.clone();
+        let worker_logs_client = logs_client.clone();
         tokio::spawn(async move {
             while let Some(request) = ai_request_rx.recv().await {
                 let result = match request {
@@ -107,25 +113,28 @@ pub async fn run_app(
                         Ok(text) => AiResponse::Explanation(text),
                         Err(e) => AiResponse::Error(e.to_string()),
                     },
-                    AiRequest::AskQuestion(input) => {
+                    AiRequest::AskQuestion {
+                        question: input,
+                        local_logs,
+                    } => {
                         // First detect intent
                         match client.detect_intent(&input).await {
                             Ok(UserIntent::SetFilter {
                                 filter,
                                 description,
                             }) => {
-                                // Just return the filter to set
+                                let clean_filter = sanitize_query(&filter);
                                 AiResponse::FilterSet {
-                                    filter: filter.clone(),
+                                    filter: clean_filter.clone(),
                                     message: format!(
-                                        "✅ Already set filter: {}\n\n{}",
-                                        filter, description
+                                        "✅ 已设置过滤条件: {}\n\n{}",
+                                        clean_filter, description
                                     ),
                                 }
                             }
                             Ok(UserIntent::Question { question }) => {
-                                // Normal Q&A flow
-                                if let Some(ref lc) = logs_client {
+                                // Live GCP Q&A flow if connected, otherwise analyze local/offline logs
+                                if let Some(ref lc) = worker_logs_client {
                                     match client.ask_question(&question, lc).await {
                                         Ok(qa) => AiResponse::QuestionAnswer {
                                             query: qa.query,
@@ -135,16 +144,26 @@ pub async fn run_app(
                                         Err(e) => AiResponse::Error(e.to_string()),
                                     }
                                 } else {
-                                    AiResponse::Error("Logs client not available".to_string())
+                                    match client.analyze_logs(&local_logs).await {
+                                        Ok(answer) => AiResponse::QuestionAnswer {
+                                            query: "(offline buffer)".to_string(),
+                                            log_count: local_logs.len(),
+                                            answer,
+                                        },
+                                        Err(e) => AiResponse::Error(e.to_string()),
+                                    }
                                 }
                             }
-                            Ok(UserIntent::GenerateQuery { query }) => AiResponse::FilterSet {
-                                filter: query.clone(),
-                                message: format!(
-                                    "📋 Generated query: {}\n\n(already set as filter)",
-                                    query
-                                ),
-                            },
+                            Ok(UserIntent::GenerateQuery { query }) => {
+                                let clean_query = sanitize_query(&query);
+                                AiResponse::FilterSet {
+                                    filter: clean_query.clone(),
+                                    message: format!(
+                                        "📋 Generated query: {}\n\n(applied as active filter)",
+                                        clean_query
+                                    ),
+                                }
+                            }
                             Err(e) => AiResponse::Error(e.to_string()),
                         }
                     }
@@ -176,6 +195,7 @@ pub async fn run_app(
         &mut log_rx,
         &mut ai_rx,
         ai_request_tx.as_ref(),
+        logs_client.as_ref(),
     )
     .await;
 
@@ -185,6 +205,32 @@ pub async fn run_app(
     result
 }
 
+/// Restart the live GCP log stream when the active filter changes.
+async fn restart_live_stream(
+    app: &mut App,
+    log_rx: &mut mpsc::Receiver<LogEntry>,
+    logs_client: &LogsClient,
+    filter_expr: Option<&str>,
+) {
+    let lookback = chrono::Duration::hours(1);
+    let mut gcp_filter = LogFilter::new().since(lookback);
+    if let Some(expr) = filter_expr
+        && !expr.trim().is_empty()
+    {
+        gcp_filter = gcp_filter.raw(expr);
+    }
+
+    match logs_client.stream_entries(Some(gcp_filter), lookback).await {
+        Ok((new_rx, _handle)) => {
+            app.reset_for_new_stream();
+            *log_rx = new_rx;
+        }
+        Err(e) => {
+            app.set_error(format!("Failed to update stream filter: {}", e));
+        }
+    }
+}
+
 /// The main event loop.
 async fn run_event_loop(
     terminal: &mut Term,
@@ -192,6 +238,7 @@ async fn run_event_loop(
     log_rx: &mut mpsc::Receiver<LogEntry>,
     ai_rx: &mut mpsc::Receiver<AiResponse>,
     ai_tx: Option<&mpsc::Sender<AiRequest>>,
+    logs_client: Option<&LogsClient>,
 ) -> Result<()> {
     loop {
         // 1. Draw UI
@@ -211,25 +258,33 @@ async fn run_event_loop(
             // Delegate to event handler
             let action = input::handle_key_event(app, key);
 
-            // Process any AI actions
-            if let Some(tx) = ai_tx {
-                match action {
-                    input::Action::ExplainLog => {
-                        if let Some(entry) = app.selected_log().cloned() {
-                            app.start_ai_loading();
-                            let _ = tx.send(AiRequest::ExplainLog(Box::new(entry))).await;
-                        }
+            match action {
+                input::Action::ApplyFilter(new_filter) => {
+                    if let Some(lc) = logs_client {
+                        restart_live_stream(app, log_rx, lc, new_filter.as_deref()).await;
                     }
-                    input::Action::AskQuestion(question) => {
-                        app.start_ai_loading();
-                        app.ai_query = Some(question.clone()); // Store the question
-                        let _ = tx.send(AiRequest::AskQuestion(question)).await;
-                    }
-                    input::Action::GenerateQuery(_) => {
-                        // Keep for backward compatibility if needed
-                    }
-                    input::Action::None => {}
                 }
+                input::Action::ExplainLog => {
+                    if let Some(tx) = ai_tx
+                        && let Some(entry) = app.selected_log().cloned()
+                    {
+                        app.start_ai_loading();
+                        let _ = tx.send(AiRequest::ExplainLog(Box::new(entry))).await;
+                    }
+                }
+                input::Action::AskQuestion(question) => {
+                    if let Some(tx) = ai_tx {
+                        app.start_ai_loading();
+                        app.ai_query = Some(question.clone());
+                        let _ = tx
+                            .send(AiRequest::AskQuestion {
+                                question,
+                                local_logs: app.logs.clone(),
+                            })
+                            .await;
+                    }
+                }
+                input::Action::GenerateQuery(_) | input::Action::None => {}
             }
         }
 
@@ -249,8 +304,11 @@ async fn run_event_loop(
                     app.set_ai_response(text);
                 }
                 AiResponse::FilterSet { filter, message } => {
-                    // Set the filter and show confirmation
-                    app.filter = Some(filter);
+                    // Set the filter, update local/live stream, and show confirmation
+                    app.set_filter(Some(filter.clone()));
+                    if let Some(lc) = logs_client {
+                        restart_live_stream(app, log_rx, lc, Some(&filter)).await;
+                    }
                     app.set_ai_response(message);
                 }
                 AiResponse::QuestionAnswer {
@@ -330,7 +388,9 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Theme::Dark => "🌙",
         Theme::Light => "☀️",
     };
-    let status = if app.is_streaming {
+    let status = if app.offline_logs.is_some() {
+        "📁 OFFLINE"
+    } else if app.is_streaming {
         "● LIVE"
     } else {
         "○ PAUSED"
