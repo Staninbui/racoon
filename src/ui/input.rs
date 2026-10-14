@@ -127,6 +127,20 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Toggle Error Fingerprinting & Spike Radar view (`c` key)
+        KeyCode::Char('c') => {
+            app.toggle_radar();
+            Action::None
+        }
+
+        // In Radar view, pressing Enter drills down into the selected error cluster
+        KeyCode::Enter if app.show_radar => {
+            if app.drill_into_selected_cluster().is_none() {
+                app.set_error("No error cluster selected to drill into.".to_string());
+            }
+            Action::None
+        }
+
         // Toggle Distributed Trace Context Explorer (`x` key)
         KeyCode::Char('x') => match app.toggle_trace_context() {
             Ok(new_filter) => Action::ApplyFilter(new_filter),
@@ -176,8 +190,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
         // Switch AI model interactively
         KeyCode::Char('m') => Action::SwitchModel,
 
-        // Clear search / exit Trace mode / clear filter
+        // Clear search / exit Radar mode / exit Trace mode / clear filter
         KeyCode::Esc => {
+            if app.show_radar {
+                app.show_radar = false;
+                return Action::None;
+            }
             app.clear_search();
             app.clear_ai_response();
             if app.active_trace.is_some() {
@@ -319,6 +337,29 @@ mod tests {
     }
 
     #[test]
+    fn test_radar_key_c_and_enter_drilldown() {
+        let mut app = App::new("test".to_string()).with_offline_logs(vec![
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Redis connection failed on port 6379".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Request completed".to_string()),
+                ..Default::default()
+            },
+        ]);
+
+        handle_key_event(&mut app, make_key(KeyCode::Char('c')));
+        assert!(app.show_radar);
+
+        handle_key_event(&mut app, make_key(KeyCode::Enter));
+        assert!(!app.show_radar);
+        assert_eq!(app.logs.len(), 1);
+    }
+
+    #[test]
     fn test_trace_key_x_and_analyze_trace_key_shift_e() {
         let mut app = App::new("test".to_string()).with_offline_logs(vec![LogEntry {
             severity: Some("ERROR".to_string()),
@@ -328,7 +369,6 @@ mod tests {
         }]);
         app.ai_available = true;
 
-        // Pressing 'x' enters trace mode and returns ApplyFilter
         let action = handle_key_event(&mut app, make_key(KeyCode::Char('x')));
         assert!(matches!(
             action,
@@ -336,11 +376,9 @@ mod tests {
         ));
         assert_eq!(app.active_trace.as_deref(), Some("abcdef12"));
 
-        // Pressing 'E' triggers AnalyzeTrace
         let rca_action = handle_key_event(&mut app, make_key(KeyCode::Char('E')));
         assert!(matches!(rca_action, Action::AnalyzeTrace));
 
-        // Pressing 'x' again exits trace mode
         let exit_action = handle_key_event(&mut app, make_key(KeyCode::Char('x')));
         assert!(matches!(exit_action, Action::ApplyFilter(None)));
         assert!(app.active_trace.is_none());

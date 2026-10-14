@@ -28,6 +28,19 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                     .borders(Borders::ALL)
                     .border_style(colors.error_style()),
             )
+    } else if app.show_radar {
+        Paragraph::new(format!(
+            "🚨 Error Fingerprint & Spike Radar │ {} patterns ({} total errs) │ Velocity: {}\nj/k: Select Cluster │ Enter: Drill down into matching logs │ e: AI Explain Cluster │ c/Esc: Back to Log List",
+            app.radar.clusters.len(),
+            app.radar.total_error_logs,
+            app.radar.sparkline()
+        ))
+        .style(Style::default().fg(Color::LightRed))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::LightRed)),
+        )
     } else if let Some(ref trace_id) = app.active_trace {
         let filter_str = app.filter.as_deref().unwrap_or("");
         Paragraph::new(format!(
@@ -42,7 +55,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else if let Some(ref filter) = app.filter {
         Paragraph::new(format!(
-            "Filter: {} │ Press 'f' to change, 'x' to trace request, 'E' for AI RCA, Esc to clear",
+            "Filter: {} │ f: Change │ c: Error Radar │ x: Trace │ E: AI RCA │ Esc: Clear",
             filter
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -53,8 +66,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         let hints_text = "\
-j/k: Nav │ x: Trace │ e: Explain │ E: Trace RCA │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ p: Pause │ q: Quit
-g/G: First/Last │ PgUp/PgDn: ±10 │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear";
+j/k: Nav │ c: Radar │ x: Trace │ e: Explain │ E: Trace RCA │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ q: Quit
+g/G: First/Last │ PgUp/PgDn: ±10 │ p: Pause │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()
                 .borders(Borders::ALL)

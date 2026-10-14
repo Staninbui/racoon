@@ -1,7 +1,7 @@
 //! Log detail and AI response widget.
 //!
-//! Displays the full JSON of the selected log entry (with trace/span metadata),
-//! and AI analysis when available.
+//! Displays the full JSON of the selected log entry (with trace/span or error
+//! cluster metadata), and AI analysis when available.
 
 use ratatui::prelude::*;
 use ratatui::widgets::Scrollbar;
@@ -9,10 +9,22 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use crate::ui::App;
 
-/// Render the log detail pane (trace summary + JSON view).
+/// Render the log detail pane (cluster/trace summary + JSON view).
 pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
     let colors = app.colors();
-    let content = if let Some(entry) = app.selected_log() {
+    let content = if let Some(cluster) = app.selected_cluster() {
+        let json = serde_json::to_string_pretty(&cluster.sample_entry)
+            .unwrap_or_else(|_| "[Failed to serialize]".to_string());
+        format!(
+            "🚨 Error Cluster [x{} occurrences │ {} │ first: {} │ last: {}]\nFingerprint: {}\n[Enter: Drill down into logs │ e: AI Explain │ c/Esc: Back]\n────────────────────────────────────────────────────\n{}",
+            cluster.count,
+            cluster.severity,
+            cluster.first_seen,
+            cluster.last_seen,
+            cluster.fingerprint,
+            json
+        )
+    } else if let Some(entry) = app.selected_log() {
         let json = serde_json::to_string_pretty(entry)
             .unwrap_or_else(|_| "[Failed to serialize]".to_string());
 
@@ -83,7 +95,8 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         (response.clone(), colors.ai_style())
     } else {
         let help = [
-            "Press 'e' to explain selected log",
+            "Press 'e' to explain selected log (or selected Error Cluster)",
+            "Press 'c' to toggle Error Fingerprint & Spike Radar",
             "Press 'x' to isolate full request trace across services",
             "Press 'E' (Shift+e) for Full-Trace / Multi-Log AI Root Cause Analysis",
             "Press '?' to ask a natural-language question about your logs",

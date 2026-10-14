@@ -1,19 +1,24 @@
-//! Log list widget.
+//! Log list and Error Spike Radar widget.
 //!
-//! Displays a scrollable list of log entries with severity-based coloring
-//! and distributed trace badges.
+//! Displays either the scrollable list of log entries (with severity coloring
+//! and distributed trace badges) or the ranked Error Fingerprint & Spike Radar
+//! clusters when `app.show_radar` is active.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
 use crate::ui::App;
 
-/// Render the log list widget.
+/// Render the log list or the Error Spike Radar widget.
 pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
+    if app.show_radar {
+        render_radar_list(frame, app, area);
+        return;
+    }
+
     let logs = &app.logs;
     let colors = app.colors();
 
-    // Convert logs to list items with coloring and optional trace badge
     let items: Vec<ListItem> = logs
         .iter()
         .enumerate()
@@ -42,7 +47,6 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    // Update title to show Trace Context mode or search status
     let title = if let Some(ref trace_id) = app.active_trace {
         format!(
             " 🔗 Trace Context: {} ({} logs) — x/Esc: exit, E: Full-Trace AI RCA ",
@@ -62,7 +66,7 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             app.search_matches.len()
         )
     } else {
-        format!(" Logs ({}) ", logs.len())
+        format!(" Logs ({}) — press 'c' for Error Spike Radar ", logs.len())
     };
 
     let visible_height = area.height.saturating_sub(2) as usize;
@@ -86,6 +90,74 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
     let mut state = ListState::default();
     state.select(Some(app.selected_index));
     *state.offset_mut() = offset;
+
+    frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// Render the ranked Error Fingerprint & Spike Radar clusters (`c` key).
+fn render_radar_list(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
+    let clusters = &app.radar.clusters;
+
+    let items: Vec<ListItem> = if clusters.is_empty() {
+        vec![
+            ListItem::new(" 🟢 No WARNING/ERROR/CRITICAL patterns detected in current buffer.")
+                .style(colors.dim_style()),
+        ]
+    } else {
+        clusters
+            .iter()
+            .enumerate()
+            .map(|(i, cluster)| {
+                let spike_badge = if cluster.is_spike { "🚨 " } else { "🔥 " };
+                let line = format!(
+                    " {}[x{:>3}] [{}] {}  (first: {}, last: {})",
+                    spike_badge,
+                    cluster.count,
+                    cluster.severity,
+                    cluster.fingerprint,
+                    cluster.first_seen,
+                    cluster.last_seen
+                );
+
+                let mut style = colors.severity_style(&cluster.severity);
+                if i == app.radar_selected_index {
+                    style = colors.selection_style();
+                }
+
+                ListItem::new(line).style(style)
+            })
+            .collect()
+    };
+
+    let title = format!(
+        " 🚨 Error Fingerprint & Spike Radar ({} patterns │ {} total errs │ Velocity: {}) — Enter: drill down, e: AI explain, c/Esc: back ",
+        clusters.len(),
+        app.radar.total_error_logs,
+        app.radar.sparkline()
+    );
+
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let offset = app.radar_selected_index.saturating_sub(visible_height / 2);
+
+    let list = List::new(items)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::LightRed)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .highlight_style(colors.selection_style());
+
+    let mut state = ListState::default();
+    if !clusters.is_empty() {
+        state.select(Some(app.radar_selected_index));
+        *state.offset_mut() = offset;
+    }
 
     frame.render_stateful_widget(list, area, &mut state);
 }

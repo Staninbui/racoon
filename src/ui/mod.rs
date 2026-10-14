@@ -5,10 +5,12 @@
 
 pub mod app;
 pub mod input;
+pub mod radar;
 pub mod theme;
 pub mod widgets;
 
 pub use app::{App, InputMode};
+pub use radar::{ErrorCluster, SpikeRadar, fingerprint_message};
 
 use std::io;
 use std::time::Duration;

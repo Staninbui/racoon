@@ -1,8 +1,9 @@
 //! Application state for the TUI.
 //!
 //! This module defines the core state that drives the UI, including
-//! the log buffer, selection state, and input handling.
+//! the log buffer, selection state, error spike radar, and input handling.
 
+use super::radar::{ErrorCluster, SpikeRadar, fingerprint_message};
 use super::theme::{Theme, ThemeColors};
 use crate::gcp::LogEntry;
 
@@ -26,6 +27,15 @@ pub struct App {
 
     /// Scroll offset for the log list.
     pub scroll_offset: usize,
+
+    /// Real-time Error Fingerprinting & Spike Radar engine.
+    pub radar: SpikeRadar,
+
+    /// Whether the top pane is currently showing the Error Spike Radar (`c` key).
+    pub show_radar: bool,
+
+    /// Currently selected cluster index in Radar mode.
+    pub radar_selected_index: usize,
 
     /// Current input mode.
     pub input_mode: InputMode,
@@ -97,6 +107,9 @@ impl App {
             max_logs: DEFAULT_MAX_LOGS,
             selected_index: 0,
             scroll_offset: 0,
+            radar: SpikeRadar::new(),
+            show_radar: false,
+            radar_selected_index: 0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             filter: None,
@@ -142,6 +155,7 @@ impl App {
     /// Initialize with a static set of offline logs (disables live streaming).
     pub fn with_offline_logs(mut self, entries: Vec<LogEntry>) -> Self {
         self.max_logs = entries.len().max(self.max_logs);
+        self.radar.rebuild_from_logs(&entries);
         self.logs = entries.clone();
         self.offline_logs = Some(entries);
         self.is_streaming = false;
@@ -149,13 +163,36 @@ impl App {
         self
     }
 
+    /// Toggle Error Fingerprint & Spike Radar view (`c` key).
+    pub fn toggle_radar(&mut self) {
+        self.show_radar = !self.show_radar;
+        if self.show_radar {
+            self.radar_selected_index = 0;
+            self.detail_scroll = 0;
+        }
+    }
+
+    /// Return the currently selected `ErrorCluster` when in Radar view.
+    pub fn selected_cluster(&self) -> Option<&ErrorCluster> {
+        if self.show_radar {
+            self.radar.clusters.get(self.radar_selected_index)
+        } else {
+            None
+        }
+    }
+
+    /// Drill down into the currently selected `ErrorCluster` in Radar view (`Enter` key):
+    /// switches back to the Log List filtered to entries matching that cluster's fingerprint.
+    pub fn drill_into_selected_cluster(&mut self) -> Option<String> {
+        let cluster = self.selected_cluster()?.clone();
+        self.show_radar = false;
+        let filter_expr = format!("fingerprint:{}", cluster.fingerprint);
+        self.set_filter(Some(filter_expr));
+        // Build a GCP-compatible severity filter for live stream if needed
+        Some(format!("severity>={}", cluster.severity))
+    }
+
     /// Toggle Distributed Trace Context mode (`x` key).
-    ///
-    /// - If not in Trace mode, extracts the correlation/trace filter from the currently
-    ///   selected log entry, saves the current filter in `previous_filter`, activates
-    ///   Trace mode, and returns `Ok(Some(trace_filter))`.
-    /// - If already in Trace mode, exits Trace mode, restores `previous_filter`, and
-    ///   returns `Ok(previous_filter)`.
     pub fn toggle_trace_context(&mut self) -> Result<Option<String>, String> {
         if self.active_trace.is_some() {
             let restored = self.exit_trace_context();
@@ -170,6 +207,7 @@ impl App {
             "Selected log has no trace, spanId, or request_id to follow.".to_string()
         })?;
 
+        self.show_radar = false;
         self.previous_filter = self.filter.clone();
         self.active_trace = Some(short_id);
         self.set_filter(Some(filter_clause.clone()));
@@ -191,6 +229,8 @@ impl App {
         {
             return;
         }
+
+        self.radar.record_entry(&entry);
 
         let was_at_bottom = self.is_at_bottom();
 
@@ -225,8 +265,10 @@ impl App {
             } else {
                 self.logs = all_logs.clone();
             }
+            self.radar.rebuild_from_logs(&self.logs);
         } else if let Some(ref expr) = normalized {
             self.logs.retain(|e| matches_local_filter(e, expr));
+            self.radar.rebuild_from_logs(&self.logs);
         }
 
         self.selected_index = 0;
@@ -240,7 +282,9 @@ impl App {
     /// Clear buffered logs when restarting a live GCP log stream with a new filter.
     pub fn reset_for_new_stream(&mut self) {
         self.logs.clear();
+        self.radar.clear();
         self.selected_index = 0;
+        self.radar_selected_index = 0;
         self.scroll_offset = 0;
         self.detail_scroll = 0;
         self.search_matches.clear();
@@ -280,29 +324,54 @@ impl App {
     }
 
     pub fn select_next(&mut self) {
-        if !self.logs.is_empty() {
+        if self.show_radar {
+            if !self.radar.clusters.is_empty() {
+                self.radar_selected_index =
+                    (self.radar_selected_index + 1).min(self.radar.clusters.len() - 1);
+            }
+        } else if !self.logs.is_empty() {
             self.selected_index = (self.selected_index + 1).min(self.logs.len() - 1);
         }
     }
 
     pub fn select_previous(&mut self) {
-        if !self.logs.is_empty() {
+        if self.show_radar {
+            if !self.radar.clusters.is_empty() {
+                self.radar_selected_index = self.radar_selected_index.saturating_sub(1);
+            }
+        } else if !self.logs.is_empty() {
             self.selected_index = self.selected_index.saturating_sub(1);
         }
     }
 
     pub fn select_first(&mut self) {
-        self.selected_index = 0;
+        if self.show_radar {
+            self.radar_selected_index = 0;
+        } else {
+            self.selected_index = 0;
+        }
     }
 
     pub fn select_last(&mut self) {
-        if !self.logs.is_empty() {
+        if self.show_radar {
+            if !self.radar.clusters.is_empty() {
+                self.radar_selected_index = self.radar.clusters.len() - 1;
+            }
+        } else if !self.logs.is_empty() {
             self.selected_index = self.logs.len() - 1;
         }
     }
 
+    /// Return the currently selected `LogEntry` (or the selected cluster's sample entry in Radar view).
     pub fn selected_log(&self) -> Option<&LogEntry> {
-        self.logs.get(self.selected_index)
+        if self.show_radar {
+            self.radar
+                .clusters
+                .get(self.radar_selected_index)
+                .map(|c| &c.sample_entry)
+        } else {
+            self.logs.get(self.selected_index)
+        }
     }
 
     pub fn clear_ai_response(&mut self) {
@@ -460,6 +529,10 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
         return true;
     }
 
+    if let Some(target_fp) = expr.strip_prefix("fingerprint:") {
+        return fingerprint_message(&entry.message_preview()) == target_fp.trim();
+    }
+
     for token in expr.split_whitespace() {
         let token_upper = token.to_uppercase();
         if let Some(target_sev) = token_upper.strip_prefix("SEVERITY>=") {
@@ -599,6 +672,40 @@ mod tests {
     }
 
     #[test]
+    fn test_app_radar_toggle_and_drill_down() {
+        let entries = vec![
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Timeout calling payment-svc:8080 after 500ms".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Timeout calling payment-svc:8080 after 750ms".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Health check OK".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
+        assert_eq!(app.radar.clusters.len(), 1);
+        assert_eq!(app.radar.clusters[0].count, 2);
+
+        app.toggle_radar();
+        assert!(app.show_radar);
+        assert!(app.selected_cluster().is_some());
+
+        // Drill down into cluster filters logs to the 2 matching entries
+        app.drill_into_selected_cluster();
+        assert!(!app.show_radar);
+        assert_eq!(app.logs.len(), 2);
+    }
+
+    #[test]
     fn test_app_trace_context_toggle() {
         let entries = vec![
             LogEntry {
@@ -624,7 +731,6 @@ mod tests {
         let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
         assert_eq!(app.logs.len(), 3);
 
-        // Toggle trace context on first log
         let filter = app.toggle_trace_context().unwrap();
         assert_eq!(
             filter.as_deref(),
@@ -633,7 +739,6 @@ mod tests {
         assert_eq!(app.active_trace.as_deref(), Some("trace-ab"));
         assert_eq!(app.logs.len(), 2);
 
-        // Toggle again exits trace mode and restores all 3 logs
         let restored = app.toggle_trace_context().unwrap();
         assert!(restored.is_none());
         assert!(app.active_trace.is_none());
