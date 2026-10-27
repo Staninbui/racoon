@@ -285,12 +285,26 @@ impl Config {
             "google" | "gemini" => std::env::var("GEMINI_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
-                .or_else(|| self.ai.providers.google.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| {
+                    self.ai
+                        .providers
+                        .google
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                })
                 .or_else(|| self.ai.api_key.clone().filter(|k| !k.is_empty())),
             "openai" | "gpt" => std::env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
-                .or_else(|| self.ai.providers.openai.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| {
+                    self.ai
+                        .providers
+                        .openai
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                })
                 .or_else(|| {
                     if self.ai.provider.eq_ignore_ascii_case("openai") {
                         self.ai.api_key.clone().filter(|k| !k.is_empty())
@@ -319,7 +333,14 @@ impl Config {
             "agnes" | "agnes-ai" => std::env::var("AGNES_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
-                .or_else(|| self.ai.providers.agnes.api_key.clone().filter(|k| !k.is_empty()))
+                .or_else(|| {
+                    self.ai
+                        .providers
+                        .agnes
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
+                })
                 .or_else(|| {
                     if self.ai.provider.eq_ignore_ascii_case("agnes") {
                         self.ai.api_key.clone().filter(|k| !k.is_empty())

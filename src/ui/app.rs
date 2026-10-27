@@ -51,7 +51,13 @@ pub struct App {
     /// Short display ID when Distributed Trace Context mode (`x` key) is active.
     pub active_trace: Option<String>,
 
-    /// Saved filter prior to entering Trace Context mode, restored when exiting Trace mode.
+    /// Scope badge when Surrounding Logs mode (`s` key, ±5s same-instance window) is active.
+    pub active_surrounding: Option<String>,
+
+    /// Deduplication key of the anchor log entry around which Surrounding Logs mode was opened.
+    pub anchor_log_key: Option<String>,
+
+    /// Saved filter prior to entering Trace or Surrounding mode, restored on exit.
     pub previous_filter: Option<String>,
 
     /// Whether AI is available.
@@ -116,6 +122,8 @@ impl App {
             input_buffer: String::new(),
             filter: None,
             active_trace: None,
+            active_surrounding: None,
+            anchor_log_key: None,
             previous_filter: None,
             ai_available: false,
             ai_response: None,
@@ -210,7 +218,11 @@ impl App {
         })?;
 
         self.show_radar = false;
-        self.previous_filter = self.filter.clone();
+        if self.active_surrounding.is_none() && self.active_trace.is_none() {
+            self.previous_filter = self.filter.clone();
+        }
+        self.active_surrounding = None;
+        self.anchor_log_key = None;
         self.active_trace = Some(short_id);
         self.set_filter(Some(filter_clause.clone()));
         Ok(Some(filter_clause))
@@ -222,6 +234,61 @@ impl App {
         let restored = self.previous_filter.take();
         self.set_filter(restored.clone());
         restored
+    }
+
+    /// Toggle Surrounding Logs Context mode (`s` key — ±5s around selected log on same resource instance).
+    pub fn toggle_surrounding_context(&mut self) -> Result<Option<String>, String> {
+        if self.active_surrounding.is_some() {
+            let restored = self.exit_surrounding_context();
+            return Ok(restored);
+        }
+
+        let entry = self
+            .selected_log()
+            .cloned()
+            .ok_or_else(|| "No log entry selected.".to_string())?;
+
+        let (filter_clause, badge) = entry.surrounding_context(5).ok_or_else(|| {
+            "Selected log has no timestamp for ±5s surrounding context.".to_string()
+        })?;
+
+        let anchor_key = entry.dedup_key();
+
+        self.show_radar = false;
+        if self.active_surrounding.is_none() && self.active_trace.is_none() {
+            self.previous_filter = self.filter.clone();
+        }
+        self.active_trace = None;
+        self.active_surrounding = Some(badge);
+        self.anchor_log_key = Some(anchor_key);
+        self.set_filter(Some(filter_clause.clone()));
+        self.select_anchor_log();
+        Ok(Some(filter_clause))
+    }
+
+    /// Exit Surrounding Logs Context mode and restore the previous filter.
+    pub fn exit_surrounding_context(&mut self) -> Option<String> {
+        self.active_surrounding = None;
+        self.anchor_log_key = None;
+        let restored = self.previous_filter.take();
+        self.set_filter(restored.clone());
+        restored
+    }
+
+    /// Move `selected_index` to the anchor log entry if present in `self.logs`.
+    pub fn select_anchor_log(&mut self) {
+        if let Some(ref key) = self.anchor_log_key
+            && let Some(idx) = self.logs.iter().position(|e| e.dedup_key() == *key)
+        {
+            self.selected_index = idx;
+        }
+    }
+
+    /// Check whether `entry` is the anchor log around which Surrounding Logs mode was opened.
+    pub fn is_anchor_log(&self, entry: &LogEntry) -> bool {
+        self.anchor_log_key
+            .as_ref()
+            .is_some_and(|k| *k == entry.dedup_key())
     }
 
     /// Add a new log entry to the buffer.
@@ -627,7 +694,52 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
             }
             continue;
         }
-        if token.starts_with("timestamp>") || token.starts_with("timestamp<") {
+        if let Some(ts_raw) = token.strip_prefix("timestamp>=") {
+            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
+            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                let bound_utc = bound.with_timezone(&chrono::Utc);
+                match entry.timestamp.or(entry.receive_timestamp) {
+                    Some(entry_ts) if entry_ts < bound_utc => return false,
+                    None => return false,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if let Some(ts_raw) = token.strip_prefix("timestamp>") {
+            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
+            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                let bound_utc = bound.with_timezone(&chrono::Utc);
+                match entry.timestamp.or(entry.receive_timestamp) {
+                    Some(entry_ts) if entry_ts <= bound_utc => return false,
+                    None => return false,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if let Some(ts_raw) = token.strip_prefix("timestamp<=") {
+            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
+            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                let bound_utc = bound.with_timezone(&chrono::Utc);
+                match entry.timestamp.or(entry.receive_timestamp) {
+                    Some(entry_ts) if entry_ts > bound_utc => return false,
+                    None => return false,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if let Some(ts_raw) = token.strip_prefix("timestamp<") {
+            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
+            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
+                let bound_utc = bound.with_timezone(&chrono::Utc);
+                match entry.timestamp.or(entry.receive_timestamp) {
+                    Some(entry_ts) if entry_ts >= bound_utc => return false,
+                    None => return false,
+                    _ => {}
+                }
+            }
             continue;
         }
 
@@ -915,5 +1027,99 @@ mod tests {
             &entry,
             "jsonPayload.trace_id=\"tr-000\""
         ));
+    }
+
+    #[test]
+    fn test_app_surrounding_context_toggle_and_anchor_selection() {
+        use crate::gcp::logs::MonitoredResource;
+        use chrono::{DateTime, Utc};
+
+        let ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let pod_resource = |pod: &str| {
+            let mut m = std::collections::HashMap::new();
+            m.insert("pod_name".to_string(), pod.to_string());
+            Some(MonitoredResource {
+                r#type: "k8s_container".to_string(),
+                labels: Some(m),
+            })
+        };
+
+        let entries = vec![
+            // Too early (20s before crash on pod-a)
+            LogEntry {
+                insert_id: Some("e-early".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:00Z")),
+                severity: Some("INFO".to_string()),
+                resource: pod_resource("pod-a"),
+                text_payload: Some("Booting service".to_string()),
+                ..Default::default()
+            },
+            // 2s before crash on pod-a (INFO level — should be revealed by `s`!)
+            LogEntry {
+                insert_id: Some("e-before".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:18Z")),
+                severity: Some("INFO".to_string()),
+                resource: pod_resource("pod-a"),
+                text_payload: Some("Pool connections at 99/100".to_string()),
+                ..Default::default()
+            },
+            // Same second on a DIFFERENT pod (pod-b — should be excluded by `s`!)
+            LogEntry {
+                insert_id: Some("e-other-pod".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:20Z")),
+                severity: Some("INFO".to_string()),
+                resource: pod_resource("pod-b"),
+                text_payload: Some("Healthy request on pod-b".to_string()),
+                ..Default::default()
+            },
+            // The target ERROR log at 13:00:20Z on pod-a
+            LogEntry {
+                insert_id: Some("e-crash".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:20Z")),
+                severity: Some("ERROR".to_string()),
+                resource: pod_resource("pod-a"),
+                text_payload: Some("FATAL: DB connection pool exhausted".to_string()),
+                ..Default::default()
+            },
+            // 3s after crash on pod-a (WARNING level — should be revealed by `s`!)
+            LogEntry {
+                insert_id: Some("e-after".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:23Z")),
+                severity: Some("WARNING".to_string()),
+                resource: pod_resource("pod-a"),
+                text_payload: Some("Readiness probe failed".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
+        // Simulate SRE filtering by severity>=ERROR initially (only 1 log visible: `e-crash`)
+        app.set_filter(Some("severity>=ERROR".to_string()));
+        assert_eq!(app.logs.len(), 1);
+        assert_eq!(app.logs[0].insert_id.as_deref(), Some("e-crash"));
+
+        // Press `s` to open ±5s Surrounding Context on `pod-a` around 13:00:20Z
+        let surrounding_filter = app.toggle_surrounding_context().unwrap();
+        assert!(surrounding_filter.is_some());
+        assert_eq!(
+            app.active_surrounding.as_deref(),
+            Some("pod-a ±5s @ 13:00:20")
+        );
+
+        // Now all 3 logs on `pod-a` within [13:00:15, 13:00:25] (INFO, ERROR, WARNING) are shown!
+        assert_eq!(app.logs.len(), 3);
+        assert_eq!(app.logs[0].insert_id.as_deref(), Some("e-before"));
+        assert_eq!(app.logs[1].insert_id.as_deref(), Some("e-crash"));
+        assert_eq!(app.logs[2].insert_id.as_deref(), Some("e-after"));
+
+        // And `selected_index` automatically landed on the anchor ERROR log (index 1)!
+        assert_eq!(app.selected_index, 1);
+        assert!(app.is_anchor_log(&app.logs[1]));
+
+        // Press `s` again to exit Surrounding Context and restore `severity>=ERROR`
+        let restored = app.toggle_surrounding_context().unwrap();
+        assert_eq!(restored.as_deref(), Some("severity>=ERROR"));
+        assert!(app.active_surrounding.is_none());
+        assert_eq!(app.logs.len(), 1);
     }
 }

@@ -715,7 +715,10 @@ async fn handle_update(config: &Config) -> Result<()> {
                         "cargo install gcp-racoon --force".cyan()
                     );
                 } else {
-                    println!("✅ Binary is already at the latest version (v{}).", current_version);
+                    println!(
+                        "✅ Binary is already at the latest version (v{}).",
+                        current_version
+                    );
                 }
             }
         }
@@ -787,7 +790,11 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
                         let prefix: String = k.chars().take(8).collect();
                         format!("{}...", prefix)
                     })
-                    .unwrap_or_else(|| format!("(not set, use {})", kind.env_var()).dimmed().to_string());
+                    .unwrap_or_else(|| {
+                        format!("(not set, use {})", kind.env_var())
+                            .dimmed()
+                            .to_string()
+                    });
                 println!("  {}_api_key: {}", kind.id(), key_preview);
             }
             println!();

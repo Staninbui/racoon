@@ -251,11 +251,10 @@ fn render_selector(
             list_state.select(Some(state.provider_index));
             frame.render_stateful_widget(list, chunks[1], &mut list_state);
 
-            let footer = Paragraph::new(
-                " j/k or ↑/↓: Navigate │ Enter/→: Choose Provider │ Esc/q: Cancel ",
-            )
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+            let footer =
+                Paragraph::new(" j/k or ↑/↓: Navigate │ Enter/→: Choose Provider │ Esc/q: Cancel ")
+                    .style(Style::default().fg(Color::DarkGray))
+                    .block(Block::default().borders(Borders::ALL));
             frame.render_widget(footer, chunks[2]);
         }
         SelectorStep::ChooseModel => {
@@ -264,12 +263,10 @@ fn render_selector(
                 .models
                 .iter()
                 .map(|m| {
-                    let is_current = provider == state.active_provider && m.id == state.active_model;
+                    let is_current =
+                        provider == state.active_provider && m.id == state.active_model;
                     let badge = if is_current { " [CURRENT]" } else { "" };
-                    let line = format!(
-                        " {:<28} │ {}{}",
-                        m.id, m.description, badge
-                    );
+                    let line = format!(" {:<28} │ {}{}", m.id, m.description, badge);
                     ListItem::new(line)
                 })
                 .collect();

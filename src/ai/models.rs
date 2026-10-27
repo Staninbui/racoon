@@ -632,7 +632,11 @@ mod tests {
         let google_models = reg.models_for(ProviderKind::Google);
         assert!(google_models.iter().any(|m| m.id == "gemini-4-argon"));
         assert!(google_models.iter().any(|m| m.id == "gemini-3.8-flash"));
-        assert!(google_models.iter().any(|m| m.id == "gemini-3.5-flash-lite"));
+        assert!(
+            google_models
+                .iter()
+                .any(|m| m.id == "gemini-3.5-flash-lite")
+        );
         assert!(
             reg.models_for(ProviderKind::Agnes)
                 .iter()

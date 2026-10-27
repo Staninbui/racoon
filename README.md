@@ -14,7 +14,8 @@ A powerful terminal UI for streaming, querying, and analyzing Google Cloud Platf
 
 - 🔴 **Real-time Log Streaming** - Watch logs as they happen with a beautiful TUI
 - 🚨 **Error Fingerprinting & Spike Radar (`c` key)** - Cluster repetitive error storms into canonical patterns with real-time Unicode velocity sparklines (`▁▂▃▄▅▆▇█`)
-- 🔗 **Distributed Trace Context (`x` / `E` keys)** - Isolate full request traces across microservices and run 1-keystroke Full-Trace AI Root Cause Analysis (RCA)
+- 🕵️ **Surrounding Instance Context (`s` key)** - Inspect ±5s of `INFO`/`DEBUG` logs on the exact same Pod / Cloud Run Revision / VM instance right before and after an error (even without a `trace_id`)
+- 🔗 **Distributed Trace Context (`x` / `E` keys)** - Isolate full request traces across microservices and run 1-keystroke Full-Trace / Context AI Root Cause Analysis (RCA)
 - 🔍 **Powerful Querying** - Use GCP filter syntax or natural language
 - 🤖 **Multi-Provider AI Analysis (`m` key)** - Switch seamlessly between Google Gemini (`gemini-3.8-flash`, `gemini-4-argon`), OpenAI, Anthropic, and Agnes AI
 - 📁 **Offline Mode** - Export logs (paginated JSON or streaming NDJSON) and analyze them later without internet
@@ -180,9 +181,10 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `PageDown` | Skip 10 logs down |
 | `PageUp` | Skip 10 logs up |
 | `c` | Toggle **Error Fingerprint & Spike Radar** (`Enter` to drill into selected cluster) |
+| `s` | Toggle **±5s Surrounding Logs Context** on the same resource instance (`🎯` marks anchor log) |
 | `x` | Toggle **Distributed Trace Context** (isolate request by `trace`, `spanId`, or `request_id`) |
 | `e` | Explain selected log (or selected Error Cluster) with AI |
-| `E` (`Shift+e`) | Run **Full-Trace / Multi-Log AI Root Cause Analysis (RCA)** |
+| `E` (`Shift+e`) | Run **Full-Trace / Surrounding Context AI Root Cause Analysis (RCA)** |
 | `?` | Ask AI a question (or set filters in natural language) |
 | `m` | Open interactive AI Provider & Model selector |
 | `/` | Search within logs |

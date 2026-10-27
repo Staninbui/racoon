@@ -775,6 +775,89 @@ impl LogEntry {
         self.correlation_id()
             .map(|(_, short_id)| format!("🔗{}", short_id))
     }
+
+    /// Build a Surrounding Context filter (`±window_secs` around this entry's timestamp,
+    /// pinned to the same resource instance when available, with all severity levels unlocked)
+    /// and a short human-readable scope badge (`s` key).
+    pub fn surrounding_context(&self, window_secs: i64) -> Option<(String, String)> {
+        let ts = self.timestamp.or(self.receive_timestamp)?;
+        let secs = window_secs.max(1);
+        let half = Duration::seconds(secs);
+        let start = ts - half;
+        let end = ts + half;
+
+        let mut clauses = Vec::new();
+        let mut scope_label: Option<String> = None;
+
+        const RESOURCE_INSTANCE_KEYS: &[&str] = &[
+            "pod_name",
+            "revision_name",
+            "instance_id",
+            "function_name",
+            "database_id",
+            "job_name",
+            "service_name",
+            "container_name",
+        ];
+
+        const ENTRY_INSTANCE_KEYS: &[&str] = &[
+            "compute.googleapis.com/resource_name",
+            "instanceId",
+            "host",
+            "k8s-pod/app",
+            "service",
+        ];
+
+        if let Some(ref res) = self.resource {
+            let rtype = res.r#type.trim();
+            if !rtype.is_empty() && !rtype.chars().any(char::is_whitespace) {
+                clauses.push(format!("resource.type=\"{}\"", rtype));
+            }
+
+            if let Some(ref rlabels) = res.labels {
+                for &key in RESOURCE_INSTANCE_KEYS {
+                    if let Some(val) = rlabels.get(key) {
+                        let trimmed = val.trim();
+                        if !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) {
+                            clauses.push(format!("resource.labels.{}=\"{}\"", key, trimmed));
+                            scope_label = Some(shorten_id(trimmed, 20));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if scope_label.is_none() && !rtype.is_empty() {
+                scope_label = Some(shorten_id(rtype, 20));
+            }
+        }
+
+        if scope_label.is_none()
+            && let Some(ref labels) = self.labels
+        {
+            for &key in ENTRY_INSTANCE_KEYS {
+                if let Some(val) = labels.get(key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() && !trimmed.chars().any(char::is_whitespace) {
+                        clauses.push(format!("labels.{}=\"{}\"", key, trimmed));
+                        scope_label = Some(shorten_id(trimmed, 20));
+                        break;
+                    }
+                }
+            }
+        }
+
+        clauses.push(format!("timestamp>=\"{}\"", start.to_rfc3339()));
+        clauses.push(format!("timestamp<=\"{}\"", end.to_rfc3339()));
+
+        let time_str = ts.format("%H:%M:%S").to_string();
+        let badge = match scope_label {
+            Some(scope) => format!("{} ±{}s @ {}", scope, secs, time_str),
+            None => format!("±{}s @ {}", secs, time_str),
+        };
+
+        Some((clauses.join(" "), badge))
+    }
 }
 
 fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
@@ -1041,5 +1124,33 @@ mod tests {
         assert!(entry.matches_query_lower("checkout-api"));
         assert!(entry.matches_query_lower("e_conn_reset"));
         assert!(!entry.matches_query_lower("nonexistent_token"));
+    }
+
+    #[test]
+    fn test_log_entry_surrounding_context() {
+        let ts = DateTime::parse_from_rfc3339("2026-10-27T13:00:10Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut rlabels = HashMap::new();
+        rlabels.insert("pod_name".to_string(), "order-svc-7d9f8b-x2k9p".to_string());
+
+        let entry = LogEntry {
+            timestamp: Some(ts),
+            severity: Some("ERROR".to_string()),
+            resource: Some(MonitoredResource {
+                r#type: "k8s_container".to_string(),
+                labels: Some(rlabels),
+            }),
+            text_payload: Some("Connection reset by peer".to_string()),
+            ..Default::default()
+        };
+
+        let (filter, badge) = entry.surrounding_context(5).unwrap();
+        assert!(filter.contains("resource.type=\"k8s_container\""));
+        assert!(filter.contains("resource.labels.pod_name=\"order-svc-7d9f8b-x2k9p\""));
+        assert!(filter.contains("timestamp>=\"2026-10-27T13:00:05+00:00\""));
+        assert!(filter.contains("timestamp<=\"2026-10-27T13:00:15+00:00\""));
+        assert!(!filter.contains("severity"));
+        assert_eq!(badge, "order-svc-7d9f8b-x2k ±5s @ 13:00:10");
     }
 }

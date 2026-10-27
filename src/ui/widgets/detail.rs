@@ -35,8 +35,13 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|s| format!(" │ Span: {}", s))
                 .unwrap_or_default();
             format!(
-                "🔗 {}{}  [x: Toggle Trace | E: Trace AI RCA]\n────────────────────────────────────────────────────\n{}",
+                "🔗 {}{}  [x: Toggle Trace | s: ±5s Context | E: AI RCA]\n────────────────────────────────────────────────────\n{}",
                 filter_clause, span_info, json
+            )
+        } else if let Some((_, scope_badge)) = entry.surrounding_context(5) {
+            format!(
+                "🕵️ Scope: {}  [s: Toggle ±5s Surrounding Logs | E: Context AI RCA]\n────────────────────────────────────────────────────\n{}",
+                scope_badge, json
             )
         } else {
             json
@@ -96,9 +101,10 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         let help = [
             "Press 'e' to explain selected log (or selected Error Cluster)",
+            "Press 's' to inspect ±5s surrounding logs on the same instance",
             "Press 'c' to toggle Error Fingerprint & Spike Radar",
             "Press 'x' to isolate full request trace across services",
-            "Press 'E' (Shift+e) for Full-Trace / Multi-Log AI Root Cause Analysis",
+            "Press 'E' (Shift+e) for Full-Trace / Context AI Root Cause Analysis",
             "Press '?' to ask a natural-language question about your logs",
             "Press 'm' to switch AI Provider & Model interactively",
         ]

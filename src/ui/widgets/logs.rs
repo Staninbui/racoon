@@ -26,11 +26,19 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             let severity = entry.severity_or_default();
             let timestamp = entry.timestamp_str();
             let message = entry.message_preview();
+            let anchor_mark = if app.active_surrounding.is_some() && app.is_anchor_log(entry) {
+                "🎯 "
+            } else {
+                ""
+            };
 
             let line = if let Some(badge) = entry.short_trace_badge() {
-                format!("{} [{}] [{}] {}", timestamp, severity, badge, message)
+                format!(
+                    "{}{} [{}] [{}] {}",
+                    anchor_mark, timestamp, severity, badge, message
+                )
             } else {
-                format!("{} [{}] {}", timestamp, severity, message)
+                format!("{}{} [{}] {}", anchor_mark, timestamp, severity, message)
             };
 
             let mut style = colors.severity_style(severity);
@@ -47,7 +55,13 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title = if let Some(ref trace_id) = app.active_trace {
+    let title = if let Some(ref scope) = app.active_surrounding {
+        format!(
+            " 🕵️ Surrounding Context: {} ({} logs) — s/Esc: exit, E: Context AI RCA ",
+            scope,
+            logs.len()
+        )
+    } else if let Some(ref trace_id) = app.active_trace {
         format!(
             " 🔗 Trace Context: {} ({} logs) — x/Esc: exit, E: Full-Trace AI RCA ",
             trace_id,
@@ -66,14 +80,23 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             app.search_matches.len()
         )
     } else {
-        format!(" Logs ({}) — press 'c' for Error Spike Radar ", logs.len())
+        format!(
+            " Logs ({}) — 'c': Error Spike Radar │ 's': ±5s Surrounding Context ",
+            logs.len()
+        )
     };
 
     let visible_height = area.height.saturating_sub(2) as usize;
     let offset = app.selected_index.saturating_sub(visible_height / 2);
 
-    let border_style = if app.active_trace.is_some() {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    let border_style = if app.active_surrounding.is_some() {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if app.active_trace.is_some() {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
     } else {
         colors.border_focused_style()
     };

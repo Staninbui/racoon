@@ -317,7 +317,10 @@ mod tests {
     fn test_models_and_update_commands() {
         // `racoon models` without arguments defaults to None (interactive selector)
         let cli = Cli::try_parse_from(["racoon", "models"]).unwrap();
-        assert!(matches!(cli.command, Commands::Models(ModelsArgs { action: None })));
+        assert!(matches!(
+            cli.command,
+            Commands::Models(ModelsArgs { action: None })
+        ));
 
         // `racoon models select` does not accept model name arguments
         let err = Cli::try_parse_from(["racoon", "models", "select", "gpt-4o"]);

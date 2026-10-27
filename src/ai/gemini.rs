@@ -147,12 +147,12 @@ impl GeminiClient {
     /// Create client from config (checks provider-specific env var first, then config file).
     pub fn from_config(config: &crate::config::Config) -> Result<Self, AiError> {
         let provider = ProviderKind::parse(&config.ai.provider);
-        let api_key = config
-            .get_provider_api_key(provider.id())
-            .ok_or_else(|| AiError::NoApiKeyForProvider {
+        let api_key = config.get_provider_api_key(provider.id()).ok_or_else(|| {
+            AiError::NoApiKeyForProvider {
                 provider: provider.display_name().to_string(),
                 env_var: provider.env_var().to_string(),
-            })?;
+            }
+        })?;
         let model = config.ai.model.clone();
         let base_url = config.get_provider_base_url(provider.id());
         Ok(Self::with_provider_and_model(

@@ -167,7 +167,11 @@ impl SpikeRadar {
         if self.clusters.is_empty() {
             "🟢 0 errs".to_string()
         } else {
-            let icon = if self.has_active_spike() { "🚨" } else { "🔥" };
+            let icon = if self.has_active_spike() {
+                "🚨"
+            } else {
+                "🔥"
+            };
             format!(
                 "{} {} patterns ({} errs) {}",
                 icon,
@@ -189,8 +193,7 @@ pub fn fingerprint_message(msg: &str) -> String {
     static RE_NUM: OnceLock<Regex> = OnceLock::new();
 
     let re_uuid = RE_UUID.get_or_init(|| {
-        Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-            .unwrap()
+        Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
     });
     let re_ip = RE_IP.get_or_init(|| Regex::new(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b").unwrap());
     let re_iso_ts = RE_ISO_TS.get_or_init(|| {
@@ -239,10 +242,7 @@ mod tests {
         let fp1 = fingerprint_message(msg1);
         let fp2 = fingerprint_message(msg2);
         assert_eq!(fp1, fp2);
-        assert_eq!(
-            fp1,
-            "Connection timeout to <IP> after <N>ms (req <UUID>)"
-        );
+        assert_eq!(fp1, "Connection timeout to <IP> after <N>ms (req <UUID>)");
     }
 
     #[test]

@@ -41,10 +41,22 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::LightRed)),
         )
+    } else if let Some(ref scope) = app.active_surrounding {
+        let filter_str = app.filter.as_deref().unwrap_or("");
+        Paragraph::new(format!(
+            "🕵️ Surrounding Mode ({}) │ 🎯 marks anchor log │ Filter: {}\ns/Esc: Exit & Restore Stream │ E: Context AI Root Cause Analysis │ e: Explain Log",
+            scope, filter_str
+        ))
+        .style(Style::default().fg(Color::Yellow))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
     } else if let Some(ref trace_id) = app.active_trace {
         let filter_str = app.filter.as_deref().unwrap_or("");
         Paragraph::new(format!(
-            "🔗 Trace Mode ({}) │ Filter: {}\nx/Esc: Exit Trace & Restore Stream │ E: Full-Trace AI Root Cause Analysis │ e: Explain Log",
+            "🔗 Trace Mode ({}) │ Filter: {}\nx/Esc: Exit Trace & Restore Stream │ s: ±5s Context │ E: Full-Trace AI Root Cause Analysis │ e: Explain Log",
             trace_id, filter_str
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -55,7 +67,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else if let Some(ref filter) = app.filter {
         Paragraph::new(format!(
-            "Filter: {} │ f: Change │ c: Error Radar │ x: Trace │ E: AI RCA │ Esc: Clear",
+            "Filter: {} │ f: Change │ s: ±5s Context │ c: Error Radar │ x: Trace │ E: AI RCA │ Esc: Clear",
             filter
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -66,8 +78,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         let hints_text = "\
-j/k: Nav │ c: Radar │ x: Trace │ e: Explain │ E: Trace RCA │ ?: AI Query │ m: Model │ /: Search │ f: Filter │ q: Quit
-g/G: First/Last │ PgUp/PgDn: ±10 │ p: Pause │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear";
+j/k: Nav │ s: ±5s Context │ c: Radar │ x: Trace │ e: Explain │ E: AI RCA │ ?: AI Query │ m: Model │ /: Search │ f: Filter
+g/G: First/Last │ PgUp/PgDn: ±10 │ p: Pause │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear │ q: Quit";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()
                 .borders(Borders::ALL)

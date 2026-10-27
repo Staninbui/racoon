@@ -111,13 +111,18 @@ pub async fn run_app(
                     local_logs,
                 } => {
                     let result = if let Some(ref client) = current_client {
-                        // Fetch full trace logs from GCP if live client and trace filter are available
+                        // Fetch full trace or surrounding context logs from GCP if live client is available
                         let mut trace_entries = if let (Some(lc), Some(expr)) =
                             (&worker_logs_client, filter_clause.as_deref())
                         {
-                            let gcp_filter = LogFilter::new()
-                                .since(chrono::Duration::hours(24))
-                                .raw(expr);
+                            let gcp_filter =
+                                if expr.contains("timestamp>") || expr.contains("timestamp<") {
+                                    LogFilter::new().raw(expr)
+                                } else {
+                                    LogFilter::new()
+                                        .since(chrono::Duration::hours(24))
+                                        .raw(expr)
+                                };
                             match lc.list_entries(Some(&gcp_filter), 30).await {
                                 Ok(mut fetched) if !fetched.is_empty() => {
                                     // `list_entries` returns newest first; reverse for chronological timeline
@@ -142,10 +147,9 @@ pub async fn run_app(
                                 Some(ref f) => {
                                     format!("🔗 Full-Trace RCA ({} logs │ {})\n\n", count, f)
                                 }
-                                None => format!(
-                                    "🔗 Multi-Log Root Cause Analysis ({} logs)\n\n",
-                                    count
-                                ),
+                                None => {
+                                    format!("🔗 Multi-Log Root Cause Analysis ({} logs)\n\n", count)
+                                }
                             };
                             match client.analyze_logs(&trace_entries).await {
                                 Ok(analysis) => {
@@ -249,13 +253,41 @@ pub async fn run_app(
     result
 }
 
-/// Restart the live GCP log stream when the active filter changes.
+/// Restart the live GCP log stream (or fetch a bounded surrounding context snapshot) when the active filter changes.
 async fn restart_live_stream(
     app: &mut App,
     log_rx: &mut mpsc::Receiver<LogEntry>,
     logs_client: &LogsClient,
     filter_expr: Option<&str>,
 ) {
+    // When Surrounding Logs mode (`s` key) is active, fetch the bounded ±5s snapshot immediately
+    // and select the anchor log entry so the user can inspect before/after logs right away.
+    if app.active_surrounding.is_some()
+        && let Some(expr) = filter_expr
+    {
+        let gcp_filter = LogFilter::new().raw(expr);
+        match logs_client
+            .list_entries(Some(&gcp_filter), app.max_logs)
+            .await
+        {
+            Ok(mut entries) => {
+                // `list_entries` returns newest first; reverse for chronological display (oldest at top)
+                entries.reverse();
+                app.reset_for_new_stream();
+                for entry in entries {
+                    app.add_log(entry);
+                }
+                app.select_anchor_log();
+                let (_idle_tx, idle_rx) = mpsc::channel(1);
+                *log_rx = idle_rx;
+            }
+            Err(e) => {
+                app.set_error(format!("Failed to fetch surrounding logs: {}", e));
+            }
+        }
+        return;
+    }
+
     let lookback = if app.active_trace.is_some() {
         chrono::Duration::hours(24)
     } else {
@@ -357,13 +389,16 @@ async fn run_event_loop(
                 }
                 input::Action::AnalyzeTrace => {
                     if let Some(tx) = ai_tx {
-                        let filter_clause = if app.active_trace.is_some() {
-                            app.filter.clone()
-                        } else {
-                            app.selected_log()
-                                .and_then(|e| e.correlation_id())
-                                .map(|(clause, _)| clause)
-                        };
+                        let filter_clause =
+                            if app.active_trace.is_some() || app.active_surrounding.is_some() {
+                                app.filter.clone()
+                            } else {
+                                app.selected_log()
+                                    .and_then(|e| {
+                                        e.correlation_id().or_else(|| e.surrounding_context(5))
+                                    })
+                                    .map(|(clause, _)| clause)
+                            };
                         app.start_ai_loading();
                         app.ai_query = Some(
                             filter_clause
@@ -407,6 +442,8 @@ async fn run_event_loop(
                 }
                 AiResponse::FilterSet { filter, message } => {
                     app.active_trace = None;
+                    app.active_surrounding = None;
+                    app.anchor_log_key = None;
                     app.previous_filter = None;
                     app.set_filter(Some(filter.clone()));
                     if let Some(lc) = logs_client {

@@ -150,6 +150,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             }
         },
 
+        // Toggle Surrounding Logs Context (`s` key — ±5s same-instance window)
+        KeyCode::Char('s') => match app.toggle_surrounding_context() {
+            Ok(new_filter) => Action::ApplyFilter(new_filter),
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
+
         // AI explain current log (`e` key)
         KeyCode::Char('e') => {
             if app.ai_available && app.selected_log().is_some() {
@@ -190,7 +199,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
         // Switch AI model interactively
         KeyCode::Char('m') => Action::SwitchModel,
 
-        // Clear search / exit Radar mode / exit Trace mode / clear filter
+        // Clear search / exit Radar mode / exit Trace or Surrounding mode / clear filter
         KeyCode::Esc => {
             if app.show_radar {
                 app.show_radar = false;
@@ -198,6 +207,10 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             }
             app.clear_search();
             app.clear_ai_response();
+            if app.active_surrounding.is_some() {
+                let restored = app.exit_surrounding_context();
+                return Action::ApplyFilter(restored);
+            }
             if app.active_trace.is_some() {
                 let restored = app.exit_trace_context();
                 return Action::ApplyFilter(restored);
@@ -233,6 +246,8 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
             match mode {
                 InputMode::Filter => {
                     app.active_trace = None;
+                    app.active_surrounding = None;
+                    app.anchor_log_key = None;
                     app.previous_filter = None;
                     app.set_filter(Some(text.clone()));
                     Action::ApplyFilter(Some(text))
@@ -382,6 +397,30 @@ mod tests {
         let exit_action = handle_key_event(&mut app, make_key(KeyCode::Char('x')));
         assert!(matches!(exit_action, Action::ApplyFilter(None)));
         assert!(app.active_trace.is_none());
+    }
+
+    #[test]
+    fn test_surrounding_key_s_and_esc_restore() {
+        use chrono::{DateTime, Utc};
+        let ts = DateTime::parse_from_rfc3339("2026-10-27T13:00:10Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let mut app = App::new("test".to_string()).with_offline_logs(vec![LogEntry {
+            insert_id: Some("err-1".to_string()),
+            timestamp: Some(ts),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Crash".to_string()),
+            ..Default::default()
+        }]);
+
+        let action = handle_key_event(&mut app, make_key(KeyCode::Char('s')));
+        assert!(matches!(action, Action::ApplyFilter(Some(_))));
+        assert!(app.active_surrounding.is_some());
+
+        let esc_action = handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(esc_action, Action::ApplyFilter(None)));
+        assert!(app.active_surrounding.is_none());
     }
 
     #[test]
