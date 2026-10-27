@@ -373,7 +373,7 @@ async fn run_event_loop(
                         let _ = tx
                             .send(AiRequest::AnalyzeTrace {
                                 filter_clause,
-                                local_logs: app.logs.clone(),
+                                local_logs: app.logs.iter().cloned().collect(),
                             })
                             .await;
                     }
@@ -385,7 +385,7 @@ async fn run_event_loop(
                         let _ = tx
                             .send(AiRequest::AskQuestion {
                                 question,
-                                local_logs: app.logs.clone(),
+                                local_logs: app.logs.iter().cloned().collect(),
                             })
                             .await;
                     }

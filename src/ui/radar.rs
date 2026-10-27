@@ -61,8 +61,8 @@ impl SpikeRadar {
         self.errors_in_current_window = 0;
     }
 
-    /// Rebuild clusters and velocity buckets from a slice of log entries.
-    pub fn rebuild_from_logs(&mut self, logs: &[LogEntry]) {
+    /// Rebuild clusters and velocity buckets from a collection of log entries.
+    pub fn rebuild_from_logs<'a>(&mut self, logs: impl IntoIterator<Item = &'a LogEntry>) {
         self.clear();
         for entry in logs {
             self.record_entry(entry);

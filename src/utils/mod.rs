@@ -107,20 +107,20 @@ fn fix_relative_timestamps(query: &str) -> String {
 ///
 pub fn parse_duration(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim();
-    if s.is_empty() {
-        return Err("Duration cannot be empty".to_string());
-    }
-
-    let (num_str, unit) = s.split_at(s.len() - 1);
+    let mut chars = s.chars();
+    let unit = chars
+        .next_back()
+        .ok_or_else(|| "Duration cannot be empty".to_string())?;
+    let num_str = chars.as_str();
     let num: u64 = num_str
         .parse()
         .map_err(|_| format!("Invalid number: {}", num_str))?;
 
     let multiplier = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
         _ => return Err(format!("Unknown unit: {}. Use s/m/h/d", unit)),
     };
 
@@ -152,6 +152,9 @@ mod tests {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("100x").is_err());
+        // Multi-byte UTF-8 unit must return Err cleanly without panicking on byte slice
+        assert!(parse_duration("1小时").is_err());
+        assert!(parse_duration("30秒").is_err());
     }
 
     #[test]

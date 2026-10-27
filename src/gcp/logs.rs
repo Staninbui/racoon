@@ -11,7 +11,7 @@ use super::auth::GcpAuth;
 use chrono::{DateTime, Duration, Utc};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -19,11 +19,24 @@ use tracing::{debug, warn};
 /// Cloud logging API base URL.
 const LOGGING_API_URL: &str = "https://logging.googleapis.com/v2/entries:list";
 
-/// Default page size for log queries.
-const DEFAULT_PAGE_SIZE: usize = 100;
+/// Page size per poll request when streaming logs.
+const STREAM_PAGE_SIZE: usize = 250;
+
+/// Maximum number of pages to fetch in a single streaming poll tick during bursts.
+const MAX_POLL_PAGES: usize = 3;
+
+/// Overlap window (in seconds) subtracted from `last_timestamp` when polling
+/// to catch late-arriving logs (`receiveTimestamp` lag) and same-timestamp entries.
+const STREAM_OVERLAP_SECS: i64 = 3;
+
+/// Maximum number of recent entry keys retained for streaming deduplication.
+const DEDUP_CAPACITY: usize = 2048;
 
 /// Polling interval for streaming logs (in seconds).
 const POLL_INTERVAL_SECS: u64 = 2;
+
+/// Maximum backoff interval (in seconds) when rate-limited (HTTP 429) or on transient errors.
+const MAX_BACKOFF_SECS: u64 = 60;
 
 /// Errors that can occur when interacting with Cloud Logging API.
 #[derive(Error, Debug)]
@@ -79,57 +92,58 @@ impl LogsClient {
         &self.project
     }
 
-    /// Query log entries from Cloud Logging.
+    /// Query log entries from Cloud Logging, automatically paginating when `limit > 1000`.
     pub async fn list_entries(
         &self,
         filter: Option<&LogFilter>,
-        page_size: usize,
+        limit: usize,
     ) -> Result<Vec<LogEntry>, LogsError> {
-        let token = self.auth.token().await?;
-        let filter_str = filter.map(|f| f.build()).unwrap_or_default();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
 
+        let filter_str = filter.map(|f| f.build()).unwrap_or_default();
         debug!(
             project = %self.project,
             filter = %filter_str,
-            page_size = page_size,
+            limit = limit,
             "Querying logs"
         );
 
-        let request_body = ListEntriesRequest {
-            resource_names: vec![format!("projects/{}", self.project)],
-            filter: if filter_str.is_empty() {
-                None
-            } else {
-                Some(filter_str)
-            },
-            order_by: Some("timestamp desc".to_string()),
-            page_size: Some(page_size.min(1000)),
-            page_token: None,
-        };
+        let mut all_entries = Vec::with_capacity(limit.min(1000));
+        let mut page_token: Option<String> = None;
 
-        let response = self
-            .http
-            .post(LOGGING_API_URL)
-            .bearer_auth(&token)
-            .json(&request_body)
-            .send()
-            .await?;
+        loop {
+            let remaining = limit.saturating_sub(all_entries.len());
+            if remaining == 0 {
+                break;
+            }
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(LogsError::ApiError {
-                code: status.as_u16(),
-                message: error_body,
-            });
+            let batch_size = remaining.min(1000);
+            let (batch, next_token) = self
+                .list_entries_paged(filter, batch_size, page_token.as_deref())
+                .await?;
+
+            let batch_empty = batch.is_empty();
+            for entry in batch {
+                if all_entries.len() < limit {
+                    all_entries.push(entry);
+                }
+            }
+
+            if all_entries.len() >= limit {
+                break;
+            }
+
+            match next_token {
+                Some(token) if !token.is_empty() && !batch_empty => {
+                    page_token = Some(token);
+                }
+                _ => break,
+            }
         }
 
-        let response_body: ListEntriesResponse = response
-            .json()
-            .await
-            .map_err(|e| LogsError::ParseError(e.to_string()))?;
-
-        Ok(response_body.entries.unwrap_or_default())
+        Ok(all_entries)
     }
 
     /// Query log entries with pagination support.
@@ -182,7 +196,8 @@ impl LogsClient {
         ))
     }
 
-    /// Start streaming logs in real-time using polling.
+    /// Start streaming logs in real-time using overlap-window polling, deduplication,
+    /// multi-page burst catch-up, and exponential backoff on rate limits.
     pub async fn stream_entries(
         &self,
         filter: Option<LogFilter>,
@@ -201,6 +216,9 @@ impl LogsClient {
 
         tokio::spawn(async move {
             let mut last_timestamp = initial_timestamp;
+            let mut has_seen_any = false;
+            let mut dedup = StreamDeduplicator::new(DEDUP_CAPACITY);
+            let mut consecutive_errors: u32 = 0;
             let mut interval =
                 tokio::time::interval(tokio::time::Duration::from_secs(POLL_INTERVAL_SECS));
 
@@ -216,25 +234,55 @@ impl LogsClient {
                     }
                     _ = interval.tick() => {
                         let mut poll_filter = filter.clone().unwrap_or_default();
-                        poll_filter = poll_filter.timestamp_after(last_timestamp);
+                        let query_cursor = if has_seen_any {
+                            let overlapped = last_timestamp - Duration::seconds(STREAM_OVERLAP_SECS);
+                            overlapped.max(initial_timestamp)
+                        } else {
+                            initial_timestamp
+                        };
+                        poll_filter = poll_filter.timestamp_at_or_after(query_cursor);
 
-                        match poll_logs(&http, &auth, &project, &poll_filter).await {
+                        match poll_logs(&http, &auth, &project, &poll_filter, &dedup).await {
                             Ok(entries) => {
+                                consecutive_errors = 0;
+
                                 if let Some(newest) = entries.first()
                                     && let Some(ts) = newest.timestamp
+                                    && ts > last_timestamp
                                 {
                                     last_timestamp = ts;
                                 }
 
+                                // Deliver oldest-first while filtering out already-emitted entries
                                 for entry in entries.into_iter().rev() {
-                                    if tx.send(entry).await.is_err() {
-                                        debug!("Receiver dropped, stopping stream");
-                                        return;
+                                    if dedup.insert(&entry) {
+                                        has_seen_any = true;
+                                        if let Some(ts) = entry.timestamp
+                                            && ts > last_timestamp
+                                        {
+                                            last_timestamp = ts;
+                                        }
+                                        if tx.send(entry).await.is_err() {
+                                            debug!("Receiver dropped, stopping stream");
+                                            return;
+                                        }
                                     }
                                 }
                             }
                             Err(e) => {
-                                warn!("Error polling logs: {}", e);
+                                consecutive_errors = consecutive_errors.saturating_add(1);
+                                let shift = consecutive_errors.min(5);
+                                let backoff_secs = (POLL_INTERVAL_SECS << shift).min(MAX_BACKOFF_SECS);
+                                warn!(
+                                    error = %e,
+                                    backoff_secs = backoff_secs,
+                                    "Error polling logs; backing off"
+                                );
+                                tokio::select! {
+                                    _ = stop_rx.recv() => break,
+                                    _ = tx.closed() => break,
+                                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)) => {}
+                                }
                             }
                         }
                     }
@@ -246,50 +294,114 @@ impl LogsClient {
     }
 }
 
-/// Helper function to poll logs (used by streaming)
+/// Bounded FIFO deduplicator for streaming log entries so overlap-window polling
+/// never emits duplicate entries while still capturing same-timestamp and late-arriving logs.
+#[derive(Debug)]
+struct StreamDeduplicator {
+    capacity: usize,
+    order: VecDeque<String>,
+    seen: HashSet<String>,
+}
+
+impl StreamDeduplicator {
+    fn new(capacity: usize) -> Self {
+        let cap = capacity.max(16);
+        Self {
+            capacity: cap,
+            order: VecDeque::with_capacity(cap),
+            seen: HashSet::with_capacity(cap),
+        }
+    }
+
+    fn contains(&self, entry: &LogEntry) -> bool {
+        self.seen.contains(&entry.dedup_key())
+    }
+
+    /// Record `entry` and return `true` if it was NOT previously seen.
+    fn insert(&mut self, entry: &LogEntry) -> bool {
+        let key = entry.dedup_key();
+        if self.seen.contains(&key) {
+            return false;
+        }
+        if self.order.len() >= self.capacity
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.seen.remove(&oldest);
+        }
+        self.seen.insert(key.clone());
+        self.order.push_back(key);
+        true
+    }
+}
+
+/// Helper function to poll logs (used by streaming), fetching up to `MAX_POLL_PAGES`
+/// pages during high-throughput bursts until already-seen logs or the end of the window is reached.
 async fn poll_logs(
     http: &Client,
     auth: &GcpAuth,
     project: &str,
     filter: &LogFilter,
+    dedup: &StreamDeduplicator,
 ) -> Result<Vec<LogEntry>, LogsError> {
     let token = auth.token().await?;
     let filter_str = filter.build();
+    let mut collected = Vec::new();
+    let mut page_token: Option<String> = None;
 
-    let request_body = ListEntriesRequest {
-        resource_names: vec![format!("projects/{}", project)],
-        filter: if filter_str.is_empty() {
-            None
-        } else {
-            Some(filter_str)
-        },
-        order_by: Some("timestamp desc".to_string()),
-        page_size: Some(DEFAULT_PAGE_SIZE),
-        page_token: None,
-    };
+    for _page in 0..MAX_POLL_PAGES {
+        let request_body = ListEntriesRequest {
+            resource_names: vec![format!("projects/{}", project)],
+            filter: if filter_str.is_empty() {
+                None
+            } else {
+                Some(filter_str.clone())
+            },
+            order_by: Some("timestamp desc".to_string()),
+            page_size: Some(STREAM_PAGE_SIZE),
+            page_token: page_token.clone(),
+        };
 
-    let response = http
-        .post(LOGGING_API_URL)
-        .bearer_auth(&token)
-        .json(&request_body)
-        .send()
-        .await?;
+        let response = http
+            .post(LOGGING_API_URL)
+            .bearer_auth(&token)
+            .json(&request_body)
+            .send()
+            .await?;
 
-    let status = response.status();
-    if !status.is_success() {
-        let error_body = response.text().await.unwrap_or_default();
-        return Err(LogsError::ApiError {
-            code: status.as_u16(),
-            message: error_body,
-        });
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(LogsError::ApiError {
+                code: status.as_u16(),
+                message: error_body,
+            });
+        }
+
+        let response_body: ListEntriesResponse = response
+            .json()
+            .await
+            .map_err(|e| LogsError::ParseError(e.to_string()))?;
+
+        let batch = response_body.entries.unwrap_or_default();
+        if batch.is_empty() {
+            break;
+        }
+
+        // If any entry in this batch has already been seen, we have caught up with the cursor
+        let reached_seen = batch.iter().any(|e| dedup.contains(e));
+        collected.extend(batch);
+
+        if reached_seen {
+            break;
+        }
+
+        match response_body.next_page_token {
+            Some(next) if !next.is_empty() => page_token = Some(next),
+            _ => break,
+        }
     }
 
-    let response_body: ListEntriesResponse = response
-        .json()
-        .await
-        .map_err(|e| LogsError::ParseError(e.to_string()))?;
-
-    Ok(response_body.entries.unwrap_or_default())
+    Ok(collected)
 }
 
 /// Handle to control a log stream
@@ -344,10 +456,17 @@ impl LogFilter {
         self
     }
 
-    /// Add a timestamp filter lower bound.
+    /// Add a timestamp filter strict lower bound (`timestamp > ...`).
     pub fn timestamp_after(mut self, timestamp: DateTime<Utc>) -> Self {
         self.parts
             .push(format!("timestamp>\"{}\"", timestamp.to_rfc3339()));
+        self
+    }
+
+    /// Add an inclusive timestamp lower bound (`timestamp >= ...`).
+    pub fn timestamp_at_or_after(mut self, timestamp: DateTime<Utc>) -> Self {
+        self.parts
+            .push(format!("timestamp>=\"{}\"", timestamp.to_rfc3339()));
         self
     }
 
@@ -442,14 +561,119 @@ impl LogEntry {
         self.severity.as_deref().unwrap_or("DEFAULT")
     }
 
-    /// Get a short preview of the log message.
+    /// Get a short preview of the log message (UTF-8 character boundary safe).
     pub fn message_preview(&self) -> String {
         let message = self.message();
-        if message.len() > 150 {
-            format!("{}...", &message[..150])
+        if let Some((byte_idx, _)) = message.char_indices().nth(150) {
+            format!("{}...", &message[..byte_idx])
         } else {
             message
         }
+    }
+
+    /// Stable deduplication key for streaming (uses `insert_id` when present,
+    /// falling back to `(timestamp, severity, message_preview)`).
+    pub fn dedup_key(&self) -> String {
+        if let Some(ref id) = self.insert_id
+            && !id.is_empty()
+        {
+            return format!("id:{}", id);
+        }
+        let ts = self
+            .timestamp
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_else(|| "no-ts".to_string());
+        format!(
+            "fallback:{}:{}:{}",
+            ts,
+            self.severity_or_default(),
+            self.message_preview()
+        )
+    }
+
+    /// Fast in-place case-insensitive check across log fields without serializing the entire
+    /// `LogEntry` to a JSON string. `needle_lower` must already be lowercased.
+    pub fn matches_query_lower(&self, needle_lower: &str) -> bool {
+        if needle_lower.is_empty() {
+            return true;
+        }
+
+        if let Some(ref text) = self.text_payload
+            && contains_ignore_case(text, needle_lower)
+        {
+            return true;
+        }
+
+        if contains_ignore_case(self.severity_or_default(), needle_lower) {
+            return true;
+        }
+
+        if let Some(ref res) = self.resource {
+            if contains_ignore_case(&res.r#type, needle_lower) {
+                return true;
+            }
+            if let Some(ref labels) = res.labels {
+                for (k, v) in labels {
+                    if contains_ignore_case(k, needle_lower)
+                        || contains_ignore_case(v, needle_lower)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        if let Some(ref labels) = self.labels {
+            for (k, v) in labels {
+                if contains_ignore_case(k, needle_lower) || contains_ignore_case(v, needle_lower) {
+                    return true;
+                }
+            }
+        }
+
+        for opt in [
+            self.trace.as_deref(),
+            self.span_id.as_deref(),
+            self.log_name.as_deref(),
+            self.insert_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if contains_ignore_case(opt, needle_lower) {
+                return true;
+            }
+        }
+
+        if let Some(ref req) = self.http_request {
+            for opt in [
+                req.request_method.as_deref(),
+                req.request_url.as_deref(),
+                req.user_agent.as_deref(),
+                req.remote_ip.as_deref(),
+                req.latency.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if contains_ignore_case(opt, needle_lower) {
+                    return true;
+                }
+            }
+            if let Some(status) = req.status
+                && status.to_string().contains(needle_lower)
+            {
+                return true;
+            }
+        }
+
+        if let Some(ref json) = self.json_payload
+            && json_value_contains_lower(json, needle_lower)
+        {
+            return true;
+        }
+
+        false
     }
 
     /// Get the full log message.
@@ -553,10 +777,43 @@ impl LogEntry {
     }
 }
 
+fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
+    if haystack.is_ascii() && needle_lower.is_ascii() {
+        let n_bytes = needle_lower.as_bytes();
+        if n_bytes.is_empty() {
+            return true;
+        }
+        if n_bytes.len() > haystack.len() {
+            return false;
+        }
+        haystack
+            .as_bytes()
+            .windows(n_bytes.len())
+            .any(|w| w.eq_ignore_ascii_case(n_bytes))
+    } else {
+        haystack.to_lowercase().contains(needle_lower)
+    }
+}
+
+fn json_value_contains_lower(val: &serde_json::Value, needle_lower: &str) -> bool {
+    match val {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => b.to_string().contains(needle_lower),
+        serde_json::Value::Number(n) => n.to_string().contains(needle_lower),
+        serde_json::Value::String(s) => contains_ignore_case(s, needle_lower),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .any(|item| json_value_contains_lower(item, needle_lower)),
+        serde_json::Value::Object(map) => map.iter().any(|(k, v)| {
+            contains_ignore_case(k, needle_lower) || json_value_contains_lower(v, needle_lower)
+        }),
+    }
+}
+
 fn shorten_id(s: &str, max_len: usize) -> String {
     let trimmed = s.trim();
-    if trimmed.chars().count() > max_len {
-        trimmed.chars().take(max_len).collect()
+    if let Some((byte_idx, _)) = trimmed.char_indices().nth(max_len) {
+        trimmed[..byte_idx].to_string()
     } else {
         trimmed.to_string()
     }
@@ -718,5 +975,71 @@ mod tests {
         let (j_filter, j_short) = json_entry.correlation_id().unwrap();
         assert_eq!(j_filter, "jsonPayload.request_id=\"req-9988776655\"");
         assert_eq!(j_short, "req-9988");
+    }
+
+    #[test]
+    fn test_message_preview_utf8_multibyte_no_panic() {
+        // 60 Chinese characters = 180 UTF-8 bytes (> 150 bytes, < 150 chars):
+        // previously panicked with byte index 150 or returned truncated bytes.
+        let cjk_60 = "数据库连接超时错误".repeat(7); // 63 chars, 189 bytes
+        let entry = LogEntry {
+            text_payload: Some(cjk_60.clone()),
+            ..Default::default()
+        };
+        assert_eq!(entry.message_preview(), cjk_60);
+
+        // 160 multi-byte characters + emoji crossing byte index 150
+        let long_cjk = format!("🚨生产故障告警：{}", "微服务调用链超时重试失败".repeat(15));
+        let long_entry = LogEntry {
+            text_payload: Some(long_cjk),
+            ..Default::default()
+        };
+        let preview = long_entry.message_preview();
+        assert!(preview.ends_with("..."));
+        // 150 chars + 3 chars for "..."
+        assert_eq!(preview.chars().count(), 153);
+    }
+
+    #[test]
+    fn test_stream_deduplicator_same_timestamp_and_eviction() {
+        let mut dedup = StreamDeduplicator::new(16);
+        let ts = Utc::now();
+
+        let e1 = LogEntry {
+            insert_id: Some("id-1".to_string()),
+            timestamp: Some(ts),
+            text_payload: Some("First log at ts".to_string()),
+            ..Default::default()
+        };
+        let e2 = LogEntry {
+            insert_id: Some("id-2".to_string()),
+            timestamp: Some(ts), // identical timestamp!
+            text_payload: Some("Second log at exact same ts".to_string()),
+            ..Default::default()
+        };
+
+        assert!(dedup.insert(&e1));
+        assert!(!dedup.insert(&e1)); // duplicate suppressed
+        assert!(dedup.insert(&e2)); // same timestamp but distinct insert_id allowed!
+        assert!(dedup.contains(&e1));
+        assert!(dedup.contains(&e2));
+    }
+
+    #[test]
+    fn test_log_entry_matches_query_lower_without_serialization() {
+        let entry = LogEntry {
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Connection reset by peer".to_string()),
+            json_payload: Some(serde_json::json!({
+                "service": "checkout-api",
+                "nested": { "error_code": "E_CONN_RESET", "retryable": true }
+            })),
+            ..Default::default()
+        };
+
+        assert!(entry.matches_query_lower("connection reset"));
+        assert!(entry.matches_query_lower("checkout-api"));
+        assert!(entry.matches_query_lower("e_conn_reset"));
+        assert!(!entry.matches_query_lower("nonexistent_token"));
     }
 }

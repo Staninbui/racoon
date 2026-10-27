@@ -268,8 +268,8 @@ async fn handle_auth() -> Result<()> {
                     println!("   Credentials are valid and can obtain access tokens.");
 
                     if let Ok(token) = auth.token().await {
-                        let preview = if token.len() > 20 {
-                            format!("{}...", &token[..20])
+                        let preview = if let Some((idx, _)) = token.char_indices().nth(20) {
+                            format!("{}...", &token[..idx])
                         } else {
                             token.clone()
                         };
@@ -783,7 +783,10 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             for &kind in ProviderKind::all() {
                 let key_preview = config
                     .get_provider_api_key(kind.id())
-                    .map(|k| format!("{}...", &k[..8.min(k.len())]))
+                    .map(|k| {
+                        let prefix: String = k.chars().take(8).collect();
+                        format!("{}...", prefix)
+                    })
                     .unwrap_or_else(|| format!("(not set, use {})", kind.env_var()).dimmed().to_string());
                 println!("  {}_api_key: {}", kind.id(), key_preview);
             }

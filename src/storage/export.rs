@@ -146,22 +146,22 @@ pub async fn export_logs(
         "Exporting logs"
     );
 
-    // Fetch logs from GCP
-    let entries = client.list_entries(filter, options.limit).await?;
-    let count = entries.len();
-
-    debug!("Fetched {} log entries", count);
-
     // Detect format from path if needed
     let format = ExportFormat::from_path(output_path);
 
     // Create output file
     let file = File::create(output_path)?;
     let mut writer = BufWriter::new(file);
+    let mut count = 0usize;
 
     // Write based on format
     match format {
         ExportFormat::Json => {
+            // Fetch logs across pages up to `options.limit`
+            let entries = client.list_entries(filter, options.limit).await?;
+            count = entries.len();
+            debug!("Fetched {} log entries", count);
+
             if options.include_metadata {
                 let wrapper = ExportWrapper {
                     metadata: ExportMetadata {
@@ -186,10 +186,32 @@ pub async fn export_logs(
             }
         }
         ExportFormat::Ndjson => {
-            for entry in &entries {
-                serde_json::to_writer(&mut writer, entry)?;
-                writeln!(&mut writer)?;
+            // Stream pages directly to BufWriter for constant-memory export
+            let mut page_token: Option<String> = None;
+            while count < options.limit {
+                let batch_size = (options.limit - count).min(1000);
+                let (batch, next_token) = client
+                    .list_entries_paged(filter, batch_size, page_token.as_deref())
+                    .await?;
+
+                let batch_empty = batch.is_empty();
+                for entry in &batch {
+                    if count >= options.limit {
+                        break;
+                    }
+                    serde_json::to_writer(&mut writer, entry)?;
+                    writeln!(&mut writer)?;
+                    count += 1;
+                }
+
+                match next_token {
+                    Some(token) if !token.is_empty() && !batch_empty && count < options.limit => {
+                        page_token = Some(token);
+                    }
+                    _ => break,
+                }
             }
+            debug!("Streamed {} log entries to NDJSON", count);
         }
     }
 

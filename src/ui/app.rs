@@ -3,6 +3,8 @@
 //! This module defines the core state that drives the UI, including
 //! the log buffer, selection state, error spike radar, and input handling.
 
+use std::collections::VecDeque;
+
 use super::radar::{ErrorCluster, SpikeRadar, fingerprint_message};
 use super::theme::{Theme, ThemeColors};
 use crate::gcp::LogEntry;
@@ -13,8 +15,8 @@ const DEFAULT_MAX_LOGS: usize = 100;
 /// The main application state.
 #[derive(Debug)]
 pub struct App {
-    /// Buffered log entries (newest last).
-    pub logs: Vec<LogEntry>,
+    /// Buffered log entries in a ring-buffer queue (newest last).
+    pub logs: VecDeque<LogEntry>,
 
     /// Full offline log dataset when viewing a local file (`racoon view`).
     pub offline_logs: Option<Vec<LogEntry>>,
@@ -102,7 +104,7 @@ impl App {
     /// Create a new App instance.
     pub fn new(project: String) -> Self {
         Self {
-            logs: Vec::with_capacity(DEFAULT_MAX_LOGS),
+            logs: VecDeque::with_capacity(DEFAULT_MAX_LOGS),
             offline_logs: None,
             max_logs: DEFAULT_MAX_LOGS,
             selected_index: 0,
@@ -156,7 +158,7 @@ impl App {
     pub fn with_offline_logs(mut self, entries: Vec<LogEntry>) -> Self {
         self.max_logs = entries.len().max(self.max_logs);
         self.radar.rebuild_from_logs(&entries);
-        self.logs = entries.clone();
+        self.logs = VecDeque::from(entries.clone());
         self.offline_logs = Some(entries);
         self.is_streaming = false;
         self.selected_index = 0;
@@ -233,13 +235,34 @@ impl App {
         self.radar.record_entry(&entry);
 
         let was_at_bottom = self.is_at_bottom();
+        let matches_active_search = self
+            .search_query
+            .as_ref()
+            .map(|q| entry.matches_query_lower(&q.to_lowercase()))
+            .unwrap_or(false);
 
-        self.logs.push(entry);
+        self.logs.push_back(entry);
+        if matches_active_search {
+            self.search_matches.push(self.logs.len() - 1);
+        }
 
         while self.logs.len() > self.max_logs {
-            self.logs.remove(0);
+            self.logs.pop_front();
             if self.selected_index > 0 {
                 self.selected_index = self.selected_index.saturating_sub(1);
+            }
+            if !self.search_matches.is_empty() {
+                self.search_matches.retain_mut(|idx| {
+                    if *idx == 0 {
+                        false
+                    } else {
+                        *idx -= 1;
+                        true
+                    }
+                });
+                if self.search_match_index >= self.search_matches.len() {
+                    self.search_match_index = 0;
+                }
             }
         }
 
@@ -263,7 +286,7 @@ impl App {
                     .cloned()
                     .collect();
             } else {
-                self.logs = all_logs.clone();
+                self.logs = VecDeque::from(all_logs.clone());
             }
             self.radar.rebuild_from_logs(&self.logs);
         } else if let Some(ref expr) = normalized {
@@ -443,25 +466,7 @@ impl App {
             .logs
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                let message = entry.message_preview().to_lowercase();
-                if message.contains(&query_lower) {
-                    return true;
-                }
-
-                let severity = entry.severity_or_default().to_lowercase();
-                if severity.contains(&query_lower) {
-                    return true;
-                }
-
-                if let Ok(json) = serde_json::to_string(entry)
-                    && json.to_lowercase().contains(&query_lower)
-                {
-                    return true;
-                }
-
-                false
-            })
+            .filter(|(_, entry)| entry.matches_query_lower(&query_lower))
             .map(|(i, _)| i)
             .collect();
 
@@ -577,6 +582,51 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
             }
             continue;
         }
+        if let Some(rest) = token.strip_prefix("labels.")
+            && let Some((key, val)) = rest.split_once('=')
+        {
+            let target = val.trim_matches('"').trim_matches('\'');
+            let matched = entry
+                .labels
+                .as_ref()
+                .and_then(|m| m.get(key))
+                .is_some_and(|v| v == target);
+            if !matched {
+                return false;
+            }
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("resource.labels.")
+            && let Some((key, val)) = rest.split_once('=')
+        {
+            let target = val.trim_matches('"').trim_matches('\'');
+            let matched = entry
+                .resource
+                .as_ref()
+                .and_then(|r| r.labels.as_ref())
+                .and_then(|m| m.get(key))
+                .is_some_and(|v| v == target);
+            if !matched {
+                return false;
+            }
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("jsonPayload.")
+            && let Some((key, val)) = rest.split_once('=')
+        {
+            let target = val.trim_matches('"').trim_matches('\'');
+            let matched = entry
+                .json_payload
+                .as_ref()
+                .and_then(|j| j.get(key))
+                .is_some_and(|v| {
+                    v.as_str() == Some(target) || v.to_string().trim_matches('"') == target
+                });
+            if !matched {
+                return false;
+            }
+            continue;
+        }
         if token.starts_with("timestamp>") || token.starts_with("timestamp<") {
             continue;
         }
@@ -589,20 +639,8 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
         if needle.is_empty() {
             continue;
         }
-        let msg_match = entry.message().to_lowercase().contains(&needle);
-        let sev_match = entry
-            .severity_or_default()
-            .to_lowercase()
-            .contains(&needle);
-        let res_match = entry
-            .resource_type()
-            .map(|r| r.to_lowercase().contains(&needle))
-            .unwrap_or(false);
-        let json_match = serde_json::to_string(entry)
-            .map(|j| j.to_lowercase().contains(&needle))
-            .unwrap_or(false);
 
-        if !(msg_match || sev_match || res_match || json_match) {
+        if !entry.matches_query_lower(&needle) {
             return false;
         }
     }
@@ -653,8 +691,10 @@ mod tests {
     fn test_app_add_log_respects_limit() {
         let mut app = App::new("test-project".to_string());
         for i in 0..150 {
-            let mut entry = LogEntry::default();
-            entry.insert_id = Some(format!("log-{}", i));
+            let entry = LogEntry {
+                insert_id: Some(format!("log-{}", i)),
+                ..Default::default()
+            };
             app.add_log(entry);
         }
         assert_eq!(app.logs.len(), DEFAULT_MAX_LOGS);
@@ -664,8 +704,10 @@ mod tests {
     fn test_app_custom_max_logs() {
         let mut app = App::new("test-project".to_string()).with_max_logs(25);
         for i in 0..40 {
-            let mut entry = LogEntry::default();
-            entry.insert_id = Some(format!("log-{}", i));
+            let entry = LogEntry {
+                insert_id: Some(format!("log-{}", i)),
+                ..Default::default()
+            };
             app.add_log(entry);
         }
         assert_eq!(app.logs.len(), 25);
@@ -777,8 +819,10 @@ mod tests {
         app.is_streaming = false;
 
         for i in 0..10 {
-            let mut entry = LogEntry::default();
-            entry.insert_id = Some(format!("log-{}", i));
+            let entry = LogEntry {
+                insert_id: Some(format!("log-{}", i)),
+                ..Default::default()
+            };
             app.add_log(entry);
         }
 
@@ -811,5 +855,65 @@ mod tests {
         assert_eq!(text, "tes");
         assert_eq!(mode, InputMode::Filter);
         assert_eq!(app.input_mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn test_app_search_matches_shift_on_ring_buffer_eviction() {
+        let mut app = App::new("test".to_string()).with_max_logs(3);
+        app.is_streaming = false;
+
+        app.add_log(LogEntry {
+            text_payload: Some("needle-first".to_string()),
+            ..Default::default()
+        });
+        app.add_log(LogEntry {
+            text_payload: Some("other".to_string()),
+            ..Default::default()
+        });
+        app.add_log(LogEntry {
+            text_payload: Some("needle-second".to_string()),
+            ..Default::default()
+        });
+
+        app.search("needle");
+        assert_eq!(app.search_matches, vec![0, 2]);
+
+        // Adding a 4th log evicts index 0 ("needle-first"), shifts index 2 -> 1,
+        // and adds a new match at index 2 ("needle-third").
+        app.add_log(LogEntry {
+            text_payload: Some("needle-third".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(app.logs.len(), 3);
+        assert_eq!(app.search_matches, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_matches_local_filter_labels_and_json_payload() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("request_id".to_string(), "req-42".to_string());
+
+        let entry = LogEntry {
+            labels: Some(labels),
+            json_payload: Some(serde_json::json!({
+                "trace_id": "tr-999",
+                "message": "Processed order"
+            })),
+            ..Default::default()
+        };
+
+        assert!(matches_local_filter(&entry, "labels.request_id=\"req-42\""));
+        assert!(!matches_local_filter(
+            &entry,
+            "labels.request_id=\"req-00\""
+        ));
+        assert!(matches_local_filter(
+            &entry,
+            "jsonPayload.trace_id=\"tr-999\""
+        ));
+        assert!(!matches_local_filter(
+            &entry,
+            "jsonPayload.trace_id=\"tr-000\""
+        ));
     }
 }

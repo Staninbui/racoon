@@ -13,9 +13,11 @@ A powerful terminal UI for streaming, querying, and analyzing Google Cloud Platf
 ## ✨ Features
 
 - 🔴 **Real-time Log Streaming** - Watch logs as they happen with a beautiful TUI
+- 🚨 **Error Fingerprinting & Spike Radar (`c` key)** - Cluster repetitive error storms into canonical patterns with real-time Unicode velocity sparklines (`▁▂▃▄▅▆▇█`)
+- 🔗 **Distributed Trace Context (`x` / `E` keys)** - Isolate full request traces across microservices and run 1-keystroke Full-Trace AI Root Cause Analysis (RCA)
 - 🔍 **Powerful Querying** - Use GCP filter syntax or natural language
-- 🤖 **AI-Powered Analysis** - Explain errors, generate queries, answer questions about your logs
-- 📁 **Offline Mode** - Export logs and analyze them later without internet
+- 🤖 **Multi-Provider AI Analysis (`m` key)** - Switch seamlessly between Google Gemini (`gemini-3.8-flash`, `gemini-4-argon`), OpenAI, Anthropic, and Agnes AI
+- 📁 **Offline Mode** - Export logs (paginated JSON or streaming NDJSON) and analyze them later without internet
 - 🎨 **Themeable** - Dark and light themes for comfortable viewing
 - ⌨️ **Vim-style Navigation** - Efficient keyboard-driven interface
 - 🔒 **Secure** - Uses your existing GCP credentials
@@ -177,18 +179,21 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `G` / `End` | Go to last log |
 | `PageDown` | Skip 10 logs down |
 | `PageUp` | Skip 10 logs up |
+| `c` | Toggle **Error Fingerprint & Spike Radar** (`Enter` to drill into selected cluster) |
+| `x` | Toggle **Distributed Trace Context** (isolate request by `trace`, `spanId`, or `request_id`) |
+| `e` | Explain selected log (or selected Error Cluster) with AI |
+| `E` (`Shift+e`) | Run **Full-Trace / Multi-Log AI Root Cause Analysis (RCA)** |
+| `?` | Ask AI a question (or set filters in natural language) |
+| `m` | Open interactive AI Provider & Model selector |
 | `/` | Search within logs |
 | `n` | Next search match |
 | `N` | Previous search match |
 | `f` | Set GCP filter |
-| `e` | Explain selected log with AI |
-| `?` | Ask AI a question |
-| `m` | Open interactive AI Provider & Model selector |
 | `p` | Pause/resume streaming |
 | `t` | Toggle theme (dark/light) |
 | `Ctrl+j/k` | Scroll detail pane |
 | `Ctrl+n/p` | Scroll AI pane |
-| `Esc` | Clear search/AI/filter |
+| `Esc` | Exit Radar / exit Trace mode / clear search, AI response, or filter |
 | `q` | Quit |
 
 ### Multi-Provider AI Models & Self-Update
@@ -262,7 +267,7 @@ Config file location: `~/.config/racoon/config.toml`
 # AI Settings (Multi-Provider: google, openai, anthropic, agnes)
 [ai]
 provider = "google"
-model = "gemini-3-flash-preview"
+model = "gemini-3.8-flash" # or "gemini-4-argon"
 
 [ai.providers.google]
 api_key = "your-gemini-api-key"
