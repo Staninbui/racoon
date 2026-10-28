@@ -187,7 +187,7 @@ impl GcpAuth {
 
         Ok(Self {
             provider,
-            http: Client::new(),
+            http: crate::utils::default_http_client(),
             impersonate_service_account: normalized_sa,
             impersonated_cache: Arc::new(Mutex::new(None)),
         })

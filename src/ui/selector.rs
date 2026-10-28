@@ -11,7 +11,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
-use super::models::{ModelInfo, ModelsRegistry, ProviderKind};
+use crate::ai::models::{ModelInfo, ModelsRegistry, ProviderKind};
 use crate::config::Config;
 
 /// Current stage in the two-step model selection wizard.

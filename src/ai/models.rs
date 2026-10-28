@@ -86,18 +86,23 @@ impl ProviderKind {
         }
     }
 
-    /// Parse a provider string from config or user input.
-    pub fn parse(s: &str) -> Self {
+    /// Try to parse a provider string from config or user input.
+    pub fn try_parse(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
-            "google" | "gemini" => ProviderKind::Google,
+            "google" | "gemini" => Some(ProviderKind::Google),
             "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" | "vertexai" => {
-                ProviderKind::VertexAi
+                Some(ProviderKind::VertexAi)
             }
-            "openai" | "gpt" => ProviderKind::OpenAi,
-            "anthropic" | "claude" => ProviderKind::Anthropic,
-            "agnes" | "agnes-ai" | "agnes_ai" => ProviderKind::Agnes,
-            _ => ProviderKind::Google,
+            "openai" | "gpt" => Some(ProviderKind::OpenAi),
+            "anthropic" | "claude" => Some(ProviderKind::Anthropic),
+            "agnes" | "agnes-ai" | "agnes_ai" => Some(ProviderKind::Agnes),
+            _ => None,
         }
+    }
+
+    /// Parse a provider string from config or user input (defaults to `ProviderKind::Google`).
+    pub fn parse(s: &str) -> Self {
+        Self::try_parse(s).unwrap_or(ProviderKind::Google)
     }
 }
 

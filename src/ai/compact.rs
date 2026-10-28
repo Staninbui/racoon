@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use super::gemini::UserIntent;
 use crate::gcp::LogEntry;
-use crate::ui::fingerprint_message;
+use crate::utils::fingerprint_message;
 
 /// High-signal resource labels worth keeping for SRE root cause analysis.
 const IMPORTANT_RESOURCE_LABELS: &[&str] = &[

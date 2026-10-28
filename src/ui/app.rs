@@ -5,9 +5,10 @@
 
 use std::collections::VecDeque;
 
-use super::radar::{ErrorCluster, SpikeRadar, fingerprint_message};
+use super::radar::{ErrorCluster, SpikeRadar};
 use super::theme::{Theme, ThemeColors};
 use crate::gcp::LogEntry;
+pub use crate::gcp::logs::{matches_local_filter, severity_rank};
 
 /// Default maximum number of logs to keep in memory.
 const DEFAULT_MAX_LOGS: usize = 100;
@@ -66,8 +67,14 @@ pub struct App {
     /// Deduplication key of the anchor log entry around which Surrounding Logs mode was opened.
     pub anchor_log_key: Option<String>,
 
-    /// Saved filter prior to entering Trace or Surrounding mode, restored on exit.
+    /// Whether the view is currently drilled down into an Error Cluster from Spike Radar.
+    pub active_cluster_drilldown: bool,
+
+    /// Saved filter prior to entering Trace, Surrounding, or Radar cluster drill-down mode, restored on exit.
     pub previous_filter: Option<String>,
+
+    /// Handle to the active background log streaming task (dropped when restarting or exiting).
+    pub stream_handle: Option<crate::gcp::StreamHandle>,
 
     /// Whether AI is available.
     pub ai_available: bool,
@@ -146,7 +153,9 @@ impl App {
             active_trace: None,
             active_surrounding: None,
             anchor_log_key: None,
+            active_cluster_drilldown: false,
             previous_filter: None,
+            stream_handle: None,
             ai_available: false,
             ai_response: None,
             ai_loading: false,
@@ -184,6 +193,12 @@ impl App {
     /// Set an initial filter string to display in the UI.
     pub fn with_filter(mut self, filter: Option<String>) -> Self {
         self.filter = filter.filter(|f| !f.trim().is_empty());
+        self
+    }
+
+    /// Attach a live stream handle so its lifecycle is tied to the TUI session.
+    pub fn with_stream_handle(mut self, handle: crate::gcp::StreamHandle) -> Self {
+        self.stream_handle = Some(handle);
         self
     }
 
@@ -228,10 +243,25 @@ impl App {
     pub fn drill_into_selected_cluster(&mut self) -> Option<String> {
         let cluster = self.selected_cluster()?.clone();
         self.show_radar = false;
+        if self.active_surrounding.is_none()
+            && self.active_trace.is_none()
+            && !self.active_cluster_drilldown
+        {
+            self.previous_filter = self.filter.clone();
+        }
+        self.active_cluster_drilldown = true;
         let filter_expr = format!("fingerprint:{}", cluster.fingerprint);
         self.set_filter(Some(filter_expr));
         // Build a GCP-compatible severity filter for live stream if needed
         Some(format!("severity>={}", cluster.severity))
+    }
+
+    /// Exit Radar cluster drill-down mode and restore the previous filter.
+    pub fn exit_cluster_drilldown(&mut self) -> Option<String> {
+        self.active_cluster_drilldown = false;
+        let restored = self.previous_filter.take();
+        self.set_filter(restored.clone());
+        restored
     }
 
     /// Toggle Distributed Trace Context mode (`x` key).
@@ -250,11 +280,15 @@ impl App {
         })?;
 
         self.show_radar = false;
-        if self.active_surrounding.is_none() && self.active_trace.is_none() {
+        if self.active_surrounding.is_none()
+            && self.active_trace.is_none()
+            && !self.active_cluster_drilldown
+        {
             self.previous_filter = self.filter.clone();
         }
         self.active_surrounding = None;
         self.anchor_log_key = None;
+        self.active_cluster_drilldown = false;
         self.active_trace = Some(short_id);
         self.set_filter(Some(filter_clause.clone()));
         Ok(Some(filter_clause))
@@ -287,10 +321,14 @@ impl App {
         let anchor_key = entry.dedup_key();
 
         self.show_radar = false;
-        if self.active_surrounding.is_none() && self.active_trace.is_none() {
+        if self.active_surrounding.is_none()
+            && self.active_trace.is_none()
+            && !self.active_cluster_drilldown
+        {
             self.previous_filter = self.filter.clone();
         }
         self.active_trace = None;
+        self.active_cluster_drilldown = false;
         self.active_surrounding = Some(badge);
         self.anchor_log_key = Some(anchor_key);
         self.set_filter(Some(filter_clause.clone()));
@@ -305,6 +343,30 @@ impl App {
         let restored = self.previous_filter.take();
         self.set_filter(restored.clone());
         restored
+    }
+
+    /// Clear all temporary context overlay states (Trace, Surrounding, Radar cluster drill-down)
+    /// when a brand-new user or AI filter is explicitly applied.
+    pub fn clear_context_overlay(&mut self) {
+        self.active_trace = None;
+        self.active_surrounding = None;
+        self.anchor_log_key = None;
+        self.active_cluster_drilldown = false;
+        self.previous_filter = None;
+    }
+
+    /// If any temporary context overlay (Surrounding, Trace, or Radar drill-down) is active,
+    /// exit it and restore `previous_filter`, returning `Some(restored_filter)`.
+    pub fn exit_active_overlay(&mut self) -> Option<Option<String>> {
+        if self.active_surrounding.is_some() {
+            Some(self.exit_surrounding_context())
+        } else if self.active_trace.is_some() {
+            Some(self.exit_trace_context())
+        } else if self.active_cluster_drilldown {
+            Some(self.exit_cluster_drilldown())
+        } else {
+            None
+        }
     }
 
     /// Move `selected_index` to the anchor log entry if present in `self.logs`.
@@ -723,197 +785,6 @@ impl App {
     }
 }
 
-/// Evaluate whether a `LogEntry` satisfies a filter expression locally.
-pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
-    let expr = filter_expr.trim();
-    if expr.is_empty() {
-        return true;
-    }
-
-    if let Some(target_fp) = expr.strip_prefix("fingerprint:") {
-        return fingerprint_message(&entry.message_preview()) == target_fp.trim();
-    }
-
-    for token in expr.split_whitespace() {
-        let token_upper = token.to_uppercase();
-        if let Some(target_sev) = token_upper.strip_prefix("SEVERITY>=") {
-            let target_sev = target_sev.trim_matches('"').trim_matches('\'');
-            if severity_rank(entry.severity_or_default()) < severity_rank(target_sev) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(target_sev) = token_upper.strip_prefix("SEVERITY>") {
-            let target_sev = target_sev.trim_matches('"').trim_matches('\'');
-            if severity_rank(entry.severity_or_default()) <= severity_rank(target_sev) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(target_sev) = token_upper.strip_prefix("SEVERITY=") {
-            let target_sev = target_sev.trim_matches('"').trim_matches('\'');
-            if severity_rank(entry.severity_or_default()) != severity_rank(target_sev) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(res_type) = token.strip_prefix("resource.type=") {
-            let res_type = res_type.trim_matches('"').trim_matches('\'');
-            if entry.resource_type() != Some(res_type) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(proj_val) = token
-            .strip_prefix("project=")
-            .or_else(|| token.strip_prefix("project_id="))
-        {
-            let proj_val = proj_val.trim_matches('"').trim_matches('\'');
-            if entry.resolve_project_id("").as_deref() != Some(proj_val) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(trace_val) = token.strip_prefix("trace=") {
-            let trace_val = trace_val.trim_matches('"').trim_matches('\'');
-            if entry.trace.as_deref() != Some(trace_val) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(span_val) = token.strip_prefix("spanId=") {
-            let span_val = span_val.trim_matches('"').trim_matches('\'');
-            if entry.span_id.as_deref() != Some(span_val) {
-                return false;
-            }
-            continue;
-        }
-        if let Some(rest) = token.strip_prefix("labels.")
-            && let Some((key, val)) = rest.split_once('=')
-        {
-            let target = val.trim_matches('"').trim_matches('\'');
-            let matched = entry
-                .labels
-                .as_ref()
-                .and_then(|m| m.get(key))
-                .is_some_and(|v| v == target);
-            if !matched {
-                return false;
-            }
-            continue;
-        }
-        if let Some(rest) = token.strip_prefix("resource.labels.")
-            && let Some((key, val)) = rest.split_once('=')
-        {
-            let target = val.trim_matches('"').trim_matches('\'');
-            let matched = entry
-                .resource
-                .as_ref()
-                .and_then(|r| r.labels.as_ref())
-                .and_then(|m| m.get(key))
-                .is_some_and(|v| v == target);
-            if !matched {
-                return false;
-            }
-            continue;
-        }
-        if let Some(rest) = token.strip_prefix("jsonPayload.")
-            && let Some((key, val)) = rest.split_once('=')
-        {
-            let target = val.trim_matches('"').trim_matches('\'');
-            let matched = entry
-                .json_payload
-                .as_ref()
-                .and_then(|j| j.get(key))
-                .is_some_and(|v| {
-                    v.as_str() == Some(target) || v.to_string().trim_matches('"') == target
-                });
-            if !matched {
-                return false;
-            }
-            continue;
-        }
-        if let Some(ts_raw) = token.strip_prefix("timestamp>=") {
-            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
-            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                let bound_utc = bound.with_timezone(&chrono::Utc);
-                match entry.timestamp.or(entry.receive_timestamp) {
-                    Some(entry_ts) if entry_ts < bound_utc => return false,
-                    None => return false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        if let Some(ts_raw) = token.strip_prefix("timestamp>") {
-            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
-            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                let bound_utc = bound.with_timezone(&chrono::Utc);
-                match entry.timestamp.or(entry.receive_timestamp) {
-                    Some(entry_ts) if entry_ts <= bound_utc => return false,
-                    None => return false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        if let Some(ts_raw) = token.strip_prefix("timestamp<=") {
-            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
-            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                let bound_utc = bound.with_timezone(&chrono::Utc);
-                match entry.timestamp.or(entry.receive_timestamp) {
-                    Some(entry_ts) if entry_ts > bound_utc => return false,
-                    None => return false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-        if let Some(ts_raw) = token.strip_prefix("timestamp<") {
-            let ts_str = ts_raw.trim_matches('"').trim_matches('\'');
-            if let Ok(bound) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                let bound_utc = bound.with_timezone(&chrono::Utc);
-                match entry.timestamp.or(entry.receive_timestamp) {
-                    Some(entry_ts) if entry_ts >= bound_utc => return false,
-                    None => return false,
-                    _ => {}
-                }
-            }
-            continue;
-        }
-
-        let needle = if let Some((_, val)) = token.split_once('=') {
-            val.trim_matches('"').trim_matches('\'').to_lowercase()
-        } else {
-            token.trim_matches('"').trim_matches('\'').to_lowercase()
-        };
-        if needle.is_empty() {
-            continue;
-        }
-
-        if !entry.matches_query_lower(&needle) {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn severity_rank(sev: &str) -> u8 {
-    match sev.to_uppercase().as_str() {
-        "DEFAULT" => 0,
-        "DEBUG" => 1,
-        "INFO" => 2,
-        "NOTICE" => 3,
-        "WARNING" | "WARN" => 4,
-        "ERROR" => 5,
-        "CRITICAL" => 6,
-        "ALERT" => 7,
-        "EMERGENCY" => 8,
-        _ => 0,
-    }
-}
-
 /// Input mode for the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -1165,6 +1036,45 @@ mod tests {
         assert!(!matches_local_filter(
             &entry,
             "jsonPayload.trace_id=\"tr-000\""
+        ));
+    }
+
+    #[test]
+    fn test_matches_local_filter_boolean_operators_and_quoted_phrases() {
+        use crate::gcp::logs::MonitoredResource;
+        let entry = LogEntry {
+            severity: Some("ERROR".to_string()),
+            resource: Some(MonitoredResource {
+                r#type: "k8s_container".to_string(),
+                labels: None,
+            }),
+            text_payload: Some("Connection reset by peer on upstream".to_string()),
+            json_payload: Some(serde_json::json!({
+                "message": "Connection reset by peer",
+                "service": "order-api"
+            })),
+            ..Default::default()
+        };
+
+        // Must support explicit `AND` without treating "AND" as a literal search word
+        assert!(matches_local_filter(
+            &entry,
+            "severity>=ERROR AND resource.type=\"k8s_container\""
+        ));
+        // Must support quoted multi-word phrases
+        assert!(matches_local_filter(
+            &entry,
+            "jsonPayload.message=\"Connection reset by peer\""
+        ));
+        assert!(matches_local_filter(&entry, "\"Connection reset by peer\""));
+        // Must support NOT / negation
+        assert!(matches_local_filter(
+            &entry,
+            "severity>=ERROR AND NOT resource.type=\"cloud_run_revision\""
+        ));
+        assert!(!matches_local_filter(
+            &entry,
+            "severity>=ERROR AND NOT resource.type=\"k8s_container\""
         ));
     }
 

@@ -318,9 +318,19 @@ impl Config {
 
     /// Get API key for a specific provider (environment variable takes precedence over config file).
     pub fn get_provider_api_key(&self, provider: &str) -> Option<String> {
-        let p = provider.trim().to_lowercase();
-        match p.as_str() {
-            "google" | "gemini" => std::env::var("GEMINI_API_KEY")
+        use crate::ai::ProviderKind;
+
+        let active_kind = ProviderKind::try_parse(&self.ai.provider);
+        let fallback_key = |target: ProviderKind| {
+            if active_kind == Some(target) {
+                self.ai.api_key.clone().filter(|k| !k.is_empty())
+            } else {
+                None
+            }
+        };
+
+        match ProviderKind::try_parse(provider) {
+            Some(ProviderKind::Google) => std::env::var("GEMINI_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
                 .or_else(|| {
@@ -332,7 +342,7 @@ impl Config {
                         .filter(|k| !k.is_empty())
                 })
                 .or_else(|| self.ai.api_key.clone().filter(|k| !k.is_empty())),
-            "openai" | "gpt" => std::env::var("OPENAI_API_KEY")
+            Some(ProviderKind::OpenAi) => std::env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
                 .or_else(|| {
@@ -343,14 +353,8 @@ impl Config {
                         .clone()
                         .filter(|k| !k.is_empty())
                 })
-                .or_else(|| {
-                    if self.ai.provider.eq_ignore_ascii_case("openai") {
-                        self.ai.api_key.clone().filter(|k| !k.is_empty())
-                    } else {
-                        None
-                    }
-                }),
-            "anthropic" | "claude" => std::env::var("ANTHROPIC_API_KEY")
+                .or_else(|| fallback_key(ProviderKind::OpenAi)),
+            Some(ProviderKind::Anthropic) => std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
                 .or_else(|| {
@@ -361,14 +365,8 @@ impl Config {
                         .clone()
                         .filter(|k| !k.is_empty())
                 })
-                .or_else(|| {
-                    if self.ai.provider.eq_ignore_ascii_case("anthropic") {
-                        self.ai.api_key.clone().filter(|k| !k.is_empty())
-                    } else {
-                        None
-                    }
-                }),
-            "agnes" | "agnes-ai" => std::env::var("AGNES_API_KEY")
+                .or_else(|| fallback_key(ProviderKind::Anthropic)),
+            Some(ProviderKind::Agnes) => std::env::var("AGNES_API_KEY")
                 .ok()
                 .filter(|k| !k.is_empty())
                 .or_else(|| {
@@ -379,42 +377,33 @@ impl Config {
                         .clone()
                         .filter(|k| !k.is_empty())
                 })
+                .or_else(|| fallback_key(ProviderKind::Agnes)),
+            Some(ProviderKind::VertexAi) => std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN")
+                .ok()
+                .or_else(|| std::env::var("VERTEX_API_KEY").ok())
+                .filter(|k| !k.is_empty())
                 .or_else(|| {
-                    if self.ai.provider.eq_ignore_ascii_case("agnes") {
-                        self.ai.api_key.clone().filter(|k| !k.is_empty())
-                    } else {
-                        None
-                    }
+                    self.ai
+                        .providers
+                        .vertex
+                        .api_key
+                        .clone()
+                        .filter(|k| !k.is_empty())
                 }),
-            "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" => {
-                std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN")
-                    .ok()
-                    .or_else(|| std::env::var("VERTEX_API_KEY").ok())
-                    .filter(|k| !k.is_empty())
-                    .or_else(|| {
-                        self.ai
-                            .providers
-                            .vertex
-                            .api_key
-                            .clone()
-                            .filter(|k| !k.is_empty())
-                    })
-            }
-            _ => self.ai.api_key.clone().filter(|k| !k.is_empty()),
+            None => self.ai.api_key.clone().filter(|k| !k.is_empty()),
         }
     }
 
     /// Get custom base URL for a specific provider if configured.
     pub fn get_provider_base_url(&self, provider: &str) -> Option<String> {
-        match provider.trim().to_lowercase().as_str() {
-            "google" | "gemini" => self.ai.providers.google.base_url.clone(),
-            "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" => {
-                self.ai.providers.vertex.base_url.clone()
-            }
-            "openai" | "gpt" => self.ai.providers.openai.base_url.clone(),
-            "anthropic" | "claude" => self.ai.providers.anthropic.base_url.clone(),
-            "agnes" | "agnes-ai" => self.ai.providers.agnes.base_url.clone(),
-            _ => None,
+        use crate::ai::ProviderKind;
+
+        match ProviderKind::try_parse(provider)? {
+            ProviderKind::Google => self.ai.providers.google.base_url.clone(),
+            ProviderKind::VertexAi => self.ai.providers.vertex.base_url.clone(),
+            ProviderKind::OpenAi => self.ai.providers.openai.base_url.clone(),
+            ProviderKind::Anthropic => self.ai.providers.anthropic.base_url.clone(),
+            ProviderKind::Agnes => self.ai.providers.agnes.base_url.clone(),
         }
         .filter(|u| !u.trim().is_empty())
     }
@@ -475,17 +464,7 @@ impl Config {
                     .filter(|s| !s.trim().is_empty())
             })?;
 
-        let first = raw.split(',').next().unwrap_or("").trim();
-        if let Some(rest) = first.strip_prefix("projects/") {
-            rest.split('/')
-                .next()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        } else if !first.is_empty() && !first.starts_with("file:") && !first.contains('/') {
-            Some(first.to_string())
-        } else {
-            None
-        }
+        crate::gcp::extract_first_gcp_project_id(&raw)
     }
 
     /// Resolve the GCP region/location for Vertex AI (`VERTEX_LOCATION` > `CLOUD_ML_REGION` > `[ai.providers.vertex].location` > `"us-central1"`).

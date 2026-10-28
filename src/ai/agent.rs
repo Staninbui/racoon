@@ -1,54 +1,27 @@
-//! Unified AI client implementation (Google Gemini, OpenAI GPT, Anthropic Claude, Agnes AI).
+//! Unified AI agent & orchestrator (Google Gemini, Vertex AI, OpenAI GPT, Anthropic Claude, Agnes AI).
 //!
-//! Handles communication with multiple LLM providers for AI-powered
-//! log analysis and query generation.
+//! Handles high-level SRE workflows: log explanation (`explain_log`), multi-log root-cause
+//! analysis (`analyze_logs`), intent classification (`detect_intent`), and natural-language
+//! query generation (`generate_query`). Low-level provider HTTP protocols live in [`super::providers`]
+//! and client-side LRU caching lives in [`super::cache`].
 
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
+use super::cache::AiResponseCache;
 use super::compact::{compact_log_for_ai, compact_logs_for_rca, try_local_intent};
 use super::models::ProviderKind;
 use super::prompts;
 use super::redact::{RedactionStats, redact_sensitive_text};
+pub use crate::gcp::extract_first_gcp_project_id;
 use crate::gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
-use crate::ui::fingerprint_message;
-use crate::utils::sanitize_query;
+use crate::utils::{default_http_client, fingerprint_message, sanitize_query};
 
 /// Default model name (Google Gemini).
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
-
-/// Maximum entries retained in the client-side AI response LRU cache.
-const AI_CACHE_CAPACITY: usize = 64;
-
-/// Bounded in-memory LRU cache mapping normalized prompt/fingerprint keys to AI responses.
-#[derive(Debug, Default)]
-struct AiResponseCache {
-    entries: VecDeque<(String, String)>,
-}
-
-impl AiResponseCache {
-    fn get(&mut self, key: &str) -> Option<String> {
-        let pos = self.entries.iter().position(|(k, _)| k == key)?;
-        let (k, v) = self.entries.remove(pos)?;
-        self.entries.push_back((k, v.clone()));
-        Some(v)
-    }
-
-    fn insert(&mut self, key: String, value: String) {
-        if let Some(pos) = self.entries.iter().position(|(k, _)| k == &key) {
-            self.entries.remove(pos);
-        }
-        self.entries.push_back((key, value));
-        while self.entries.len() > AI_CACHE_CAPACITY {
-            self.entries.pop_front();
-        }
-    }
-}
 
 /// Errors that can occur during AI operations.
 #[derive(Error, Debug)]
@@ -111,57 +84,38 @@ pub enum UserIntent {
     GenerateQuery { query: String },
 }
 
-/// Unified AI client supporting Google Gemini, Vertex AI (ADC), OpenAI GPT, Anthropic Claude, and Agnes AI.
-///
-/// Named `GeminiClient` (with alias `AiClient`) for backward compatibility across the crate.
+/// Unified AI agent/client supporting Google Gemini, Vertex AI (ADC), OpenAI GPT, Anthropic Claude, and Agnes AI.
 #[derive(Clone)]
-pub struct GeminiClient {
+pub struct AiClient {
     /// HTTP client for API requests
-    http: Client,
+    pub(crate) http: Client,
     /// Active AI provider
-    provider: ProviderKind,
+    pub(crate) provider: ProviderKind,
     /// Provider API key (or optional static Bearer token for Vertex AI)
-    api_key: String,
+    pub(crate) api_key: String,
     /// Model name to use
-    model: String,
+    pub(crate) model: String,
     /// Base URL for the provider API
-    base_url: String,
+    pub(crate) base_url: String,
     /// Whether to scrub PII and secrets locally before sending prompts to the LLM
-    redact_pii: bool,
+    pub(crate) redact_pii: bool,
     /// Optional GCP authentication manager (used by `ProviderKind::VertexAi` for zero-key ADC / impersonation)
-    gcp_auth: Option<GcpAuth>,
+    pub(crate) gcp_auth: Option<GcpAuth>,
     /// Target GCP project ID for Vertex AI requests
-    vertex_project: Option<String>,
+    pub(crate) vertex_project: Option<String>,
     /// Target GCP region for Vertex AI requests (e.g. `us-central1` or `global`)
-    vertex_location: String,
+    pub(crate) vertex_location: String,
     /// Client-side LRU cache for instant 0-token repeat explanations & RCAs
-    cache: Arc<Mutex<AiResponseCache>>,
+    pub(crate) cache: Arc<Mutex<AiResponseCache>>,
 }
 
-/// Alias for `GeminiClient` representing the multi-provider AI client.
-pub type AiClient = GeminiClient;
+/// Alias for [`AiClient`] emphasizing its role as the high-level AI agent orchestrator.
+pub type AiAgent = AiClient;
 
-/// Extract a clean single GCP project ID from a `--project` value that may be comma-separated
-/// (`prod-apigw,prod-order`) or a full resource name (`projects/my-proj/locations/...`).
-pub fn extract_first_gcp_project_id(raw: &str) -> Option<String> {
-    let first = raw.split(',').next()?.trim();
-    if first.is_empty() || first.starts_with("file:") {
-        return None;
-    }
-    if let Some(rest) = first.strip_prefix("projects/") {
-        let proj = rest.split('/').next()?.trim();
-        if !proj.is_empty() {
-            return Some(proj.to_string());
-        }
-        return None;
-    }
-    if first.contains('/') {
-        return None;
-    }
-    Some(first.to_string())
-}
+/// Backward-compatible alias for [`AiClient`].
+pub type GeminiClient = AiClient;
 
-impl GeminiClient {
+impl AiClient {
     /// Create a new client using the default Google Gemini provider and model.
     pub fn new(api_key: String) -> Self {
         Self::with_model(api_key, DEFAULT_MODEL.to_string())
@@ -183,7 +137,7 @@ impl GeminiClient {
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| provider.default_base_url().to_string());
         Self {
-            http: Client::new(),
+            http: default_http_client(),
             provider,
             api_key,
             model,
@@ -225,34 +179,6 @@ impl GeminiClient {
     /// Return the configured Vertex AI region/location.
     pub fn vertex_location(&self) -> &str {
         &self.vertex_location
-    }
-
-    /// Build the Vertex AI `generateContent` endpoint URL for the configured project, location, and model.
-    pub fn vertex_endpoint_url(&self) -> Result<String, AiError> {
-        let project = self
-            .vertex_project
-            .as_deref()
-            .filter(|p| !p.trim().is_empty())
-            .ok_or_else(|| {
-                AiError::ApiError(
-                    "Vertex AI requires a GCP project ID. Pass --project <ID>, set [defaults].project, or set VERTEX_PROJECT / GOOGLE_CLOUD_PROJECT."
-                        .to_string(),
-                )
-            })?;
-        let location = self.vertex_location.trim();
-        let default_base = ProviderKind::VertexAi.default_base_url();
-        let host_base = if self.base_url != default_base && !self.base_url.trim().is_empty() {
-            self.base_url.trim_end_matches('/').to_string()
-        } else if location.eq_ignore_ascii_case("global") {
-            "https://aiplatform.googleapis.com/v1".to_string()
-        } else {
-            format!("https://{}-aiplatform.googleapis.com/v1", location)
-        };
-
-        Ok(format!(
-            "{}/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
-            host_base, project, location, self.model
-        ))
     }
 
     /// Return whether Pre-AI PII & Secret redaction is enabled.
@@ -341,7 +267,7 @@ impl GeminiClient {
         if ProviderKind::parse(&config.ai.provider) == ProviderKind::VertexAi {
             return true;
         }
-        config.get_api_key().is_some() || get_api_key().is_some()
+        config.get_api_key().is_some()
     }
 
     /// Explain a log entry using AI (with semantic compaction, PII redaction, and fingerprint LRU cache).
@@ -409,17 +335,7 @@ impl GeminiClient {
             return Ok(local_intent);
         }
 
-        let prompt = format!(
-            r#"Classify user input for GCP Cloud Logging and synthesize a GCP filter query if applicable.
-Input: "{input}"
-Intents:
-- QUESTION: asking about logs (include "gcp_query" to fetch relevant logs)
-- SET_FILTER: changing active filter
-- GENERATE_QUERY: requesting query syntax
-Return JSON only:
-{{"intent":"QUESTION"|"SET_FILTER"|"GENERATE_QUERY","gcp_query":"<valid GCP filter>","description":"<short note>"}}"#
-        );
-
+        let prompt = prompts::detect_intent_prompt(input);
         let response = self.generate_with_max_tokens(&prompt, 160).await?;
 
         let cleaned = response
@@ -623,391 +539,6 @@ Return JSON only:
         );
         self.ask_question(&question, logs_client).await
     }
-
-    /// Generate content using the configured AI provider with a task-specific `max_output_tokens` cap.
-    async fn generate_with_max_tokens(
-        &self,
-        prompt: &str,
-        max_tokens: u32,
-    ) -> Result<String, AiError> {
-        match self.provider {
-            ProviderKind::Google => self.generate_google(prompt, max_tokens).await,
-            ProviderKind::VertexAi => self.generate_vertex(prompt, max_tokens).await,
-            ProviderKind::OpenAi | ProviderKind::Agnes => {
-                self.generate_openai_compatible(prompt, max_tokens).await
-            }
-            ProviderKind::Anthropic => self.generate_anthropic(prompt, max_tokens).await,
-        }
-    }
-
-    /// Generate content via Google Cloud Vertex AI (`publishers/google/models/{model}:generateContent`)
-    /// using GCP Application Default Credentials (or IAM Service Account Impersonation).
-    async fn generate_vertex(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
-        let url = self.vertex_endpoint_url()?;
-
-        let bearer_token = if !self.api_key.trim().is_empty() {
-            self.api_key.trim().to_string()
-        } else if let Some(ref auth) = self.gcp_auth {
-            auth.cloud_platform_token().await.map_err(|e| {
-                AiError::ApiError(format!("Vertex AI GCP authentication failed: {}", e))
-            })?
-        } else {
-            let config = crate::config::Config::load();
-            let impersonate = config.resolve_impersonate_service_account(None);
-            let auth = GcpAuth::with_impersonation(impersonate)
-                .await
-                .map_err(|e| {
-                    AiError::ApiError(format!("Vertex AI GCP authentication init failed: {}", e))
-                })?;
-            auth.cloud_platform_token().await.map_err(|e| {
-                AiError::ApiError(format!("Vertex AI GCP token acquisition failed: {}", e))
-            })?
-        };
-
-        let request_body = GeminiRequest {
-            contents: vec![Content {
-                role: Some("user".to_string()),
-                parts: vec![Part {
-                    text: prompt.to_string(),
-                }],
-            }],
-            generation_config: Some(GenerationConfig {
-                temperature: Some(0.3),
-                max_output_tokens: Some(max_tokens),
-                top_p: Some(0.8),
-                top_k: Some(40),
-            }),
-        };
-
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(&bearer_token)
-            .json(&request_body)
-            .send()
-            .await?;
-        let status = response.status();
-
-        if status == 429 {
-            return Err(AiError::RateLimited);
-        }
-
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(AiError::ApiError(format!(
-                "Vertex AI HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        let response_body: GeminiResponse = response
-            .json()
-            .await
-            .map_err(|e| AiError::ParseError(e.to_string()))?;
-
-        let text = response_body
-            .candidates
-            .first()
-            .and_then(|c| c.content.parts.first())
-            .map(|p| p.text.clone())
-            .ok_or_else(|| AiError::ParseError("No content in Vertex AI response".to_string()))?;
-
-        Ok(text)
-    }
-
-    /// Generate content via Google Gemini REST API (`generateContent`).
-    async fn generate_google(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
-        let url = format!(
-            "{}/{}:generateContent?key={}",
-            self.base_url.trim_end_matches('/'),
-            self.model,
-            self.api_key
-        );
-
-        let request_body = GeminiRequest {
-            contents: vec![Content {
-                role: Some("user".to_string()),
-                parts: vec![Part {
-                    text: prompt.to_string(),
-                }],
-            }],
-            generation_config: Some(GenerationConfig {
-                temperature: Some(0.3),
-                max_output_tokens: Some(max_tokens),
-                top_p: Some(0.8),
-                top_k: Some(40),
-            }),
-        };
-
-        let response = self.http.post(&url).json(&request_body).send().await?;
-        let status = response.status();
-
-        if status == 429 {
-            return Err(AiError::RateLimited);
-        }
-
-        if status == 400 || status == 401 || status == 403 {
-            let error_body = response.text().await.unwrap_or_default();
-            if error_body.contains("API_KEY_INVALID") {
-                return Err(AiError::InvalidApiKey);
-            }
-            return Err(AiError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(AiError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        let response_body: GeminiResponse = response
-            .json()
-            .await
-            .map_err(|e| AiError::ParseError(e.to_string()))?;
-
-        let text = response_body
-            .candidates
-            .first()
-            .and_then(|c| c.content.parts.first())
-            .map(|p| p.text.clone())
-            .ok_or_else(|| AiError::ParseError("No content in response".to_string()))?;
-
-        Ok(text)
-    }
-
-    /// Generate content via OpenAI-compatible `/chat/completions` (used by OpenAI and Agnes AI).
-    async fn generate_openai_compatible(
-        &self,
-        prompt: &str,
-        max_tokens: u32,
-    ) -> Result<String, AiError> {
-        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-
-        let request_body = OpenAiChatRequest {
-            model: self.model.clone(),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
-            temperature: Some(0.3),
-            max_tokens: Some(max_tokens),
-        };
-
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&request_body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if status == 429 {
-            return Err(AiError::RateLimited);
-        }
-        if status == 401 || status == 403 {
-            return Err(AiError::InvalidApiKey);
-        }
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(AiError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        let response_body: OpenAiChatResponse = response
-            .json()
-            .await
-            .map_err(|e| AiError::ParseError(e.to_string()))?;
-
-        let text = response_body
-            .choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| AiError::ParseError("No choices in response".to_string()))?;
-
-        Ok(text)
-    }
-
-    /// Generate content via Anthropic `/messages` API.
-    async fn generate_anthropic(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
-        let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
-
-        let request_body = AnthropicMessagesRequest {
-            model: self.model.clone(),
-            max_tokens,
-            temperature: Some(0.3),
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            }],
-        };
-
-        let response = self
-            .http
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&request_body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if status == 429 {
-            return Err(AiError::RateLimited);
-        }
-        if status == 401 || status == 403 {
-            return Err(AiError::InvalidApiKey);
-        }
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(AiError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
-
-        let response_body: AnthropicMessagesResponse = response
-            .json()
-            .await
-            .map_err(|e| AiError::ParseError(e.to_string()))?;
-
-        let text = response_body
-            .content
-            .iter()
-            .find_map(|b| b.text.clone())
-            .ok_or_else(|| AiError::ParseError("No text content in response".to_string()))?;
-
-        Ok(text)
-    }
-}
-
-/// Get API key from environment or config file (legacy helper).
-fn get_api_key() -> Option<String> {
-    if let Ok(key) = std::env::var("GEMINI_API_KEY")
-        && !key.is_empty()
-    {
-        return Some(key);
-    }
-
-    let config_path = dirs::config_dir()?.join("racoon/config.toml");
-
-    if config_path.exists()
-        && let Ok(content) = std::fs::read_to_string(&config_path)
-    {
-        for line in content.lines() {
-            let line = line.trim();
-            if (line.starts_with("gemini_api_key") || line.starts_with("api_key"))
-                && let Some(value) = line.split('=').nth(1)
-            {
-                let key = value.trim().trim_matches('"').trim_matches('\'');
-                if !key.is_empty() {
-                    return Some(key.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-// ============================================================================
-// Provider API Request/Response types
-// ============================================================================
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiRequest {
-    contents: Vec<Content>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    generation_config: Option<GenerationConfig>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Content {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    role: Option<String>,
-    parts: Vec<Part>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Part {
-    text: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_k: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GeminiResponse {
-    candidates: Vec<Candidate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Candidate {
-    content: Content,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiChatRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChatResponse {
-    choices: Vec<OpenAiChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiChoice {
-    message: ChatMessage,
-}
-
-#[derive(Debug, Serialize)]
-struct AnthropicMessagesRequest {
-    model: String,
-    max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
-    messages: Vec<ChatMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicMessagesResponse {
-    content: Vec<AnthropicContentBlock>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicContentBlock {
-    #[serde(default)]
-    text: Option<String>,
 }
 
 /// Try to fetch logs with the given query, handling errors gracefully.
@@ -1051,23 +582,10 @@ mod tests {
         let _ = GeminiClient::is_available();
     }
 
-    #[test]
-    fn test_get_api_key_from_env() {
-        unsafe {
-            std::env::set_var("GEMINI_API_KEY", "test-api-key-123");
-        }
-        let key = get_api_key();
-        assert_eq!(key, Some("test-api-key-123".to_string()));
-        unsafe {
-            std::env::remove_var("GEMINI_API_KEY");
-        }
-    }
-
     #[tokio::test]
     async fn test_explain_log_pattern_lru_cache_zero_tokens_on_second_log() {
         let client = GeminiClient::new("dummy-key-never-called".to_string());
 
-        // Seed cache for the normalized pattern of a connection timeout log
         let sample_entry_1 = LogEntry {
             insert_id: Some("log-1".to_string()),
             severity: Some("ERROR".to_string()),
@@ -1085,8 +603,6 @@ mod tests {
         );
         client.put_cached_response(cache_key, "Root cause: payment-svc timeout".to_string());
 
-        // Now explain a DIFFERENT log entry with a different dynamic latency (750ms vs 500ms)
-        // and different insert_id ("log-2") — it matches the same normalized fingerprint and hits cache with 0 network calls!
         let sample_entry_2 = LogEntry {
             insert_id: Some("log-2".to_string()),
             severity: Some("ERROR".to_string()),
@@ -1102,7 +618,6 @@ mod tests {
     async fn test_detect_intent_zero_token_local_fast_path() {
         let client = GeminiClient::new("dummy-key-never-called".to_string());
 
-        // Even with a dummy API key and no network, `detect_intent` resolves local filter commands in 0 tokens!
         let intent = client.detect_intent("只看错误").await.unwrap();
         assert!(matches!(
             intent,
@@ -1116,7 +631,6 @@ mod tests {
         config.set_active_model("vertex", "gemini-3.8-flash");
         config.ai.providers.vertex.location = Some("us-central1".to_string());
 
-        // Vertex AI does NOT require any external API key when initialized from config
         let client =
             GeminiClient::from_config_with_gcp(&config, None, Some("prod-apigw,prod-order"))
                 .expect("Vertex AI client should initialize without an external API key");
@@ -1128,7 +642,6 @@ mod tests {
             "https://us-central1-aiplatform.googleapis.com/v1/projects/prod-apigw/locations/us-central1/publishers/google/models/gemini-3.8-flash:generateContent"
         );
 
-        // Global location uses `aiplatform.googleapis.com` and extracts project from Log View path
         let global_client = client.with_vertex_target(
             Some(
                 "projects/sec-audit-prod/locations/global/buckets/_Default/views/_AllLogs"

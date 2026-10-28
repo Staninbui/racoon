@@ -72,7 +72,7 @@ impl ProjectsClient {
     pub fn new(auth: GcpAuth) -> Self {
         Self {
             auth,
-            http: Client::new(),
+            http: crate::utils::default_http_client(),
         }
     }
 

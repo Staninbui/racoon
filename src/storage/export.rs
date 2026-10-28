@@ -146,8 +146,8 @@ pub async fn export_logs(
         "Exporting logs"
     );
 
-    // Detect format from path if needed
-    let format = ExportFormat::from_path(output_path);
+    // Use explicitly configured format from ExportOptions
+    let format = options.format;
 
     // Create output file
     let file = File::create(output_path)?;

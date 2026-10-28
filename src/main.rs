@@ -119,17 +119,31 @@ fn init_tracing(level: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve GCP project ID from CLI argument or config defaults.
+fn resolve_project(cli_project: Option<String>, config: &Config) -> Result<String> {
+    cli_project
+        .or_else(|| config.defaults.project.clone())
+        .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))
+}
+
+/// Initialize and verify GCP authentication (with optional service account impersonation).
+async fn init_verified_auth(impersonate_sa: Option<String>) -> Result<GcpAuth> {
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
+        .await
+        .context("Failed to initialize GCP authentication")?;
+    auth.verify()
+        .await
+        .context("Failed to verify GCP authentication")?;
+    Ok(auth)
+}
+
 /// handle tail command
 async fn handle_tail(
     args: TailArgs,
     config: &Config,
     impersonate_sa: Option<String>,
 ) -> Result<()> {
-    // Use config default for project if not specified
-    let project = args
-        .project
-        .or_else(|| config.defaults.project.clone())
-        .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
+    let project = resolve_project(args.project, config)?;
 
     // Apply theme
     let theme = Theme::parse(&config.ui.theme);
@@ -140,13 +154,7 @@ async fn handle_tail(
     let duration = gcp_racoon::parse_duration_chrono(since_str)
         .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
-    let auth = GcpAuth::with_impersonation(impersonate_sa)
-        .await
-        .context("Failed to initialize GCP authentication")?;
-
-    auth.verify()
-        .await
-        .context("Failed to verify GCP authentication")?;
+    let auth = init_verified_auth(impersonate_sa).await?;
 
     println!("✅ Connected to GCP");
 
@@ -197,7 +205,7 @@ async fn handle_tail(
     info!("Filter: {}", filter.build());
 
     // Start streaming
-    let (rx, _handle) = client.stream_entries(Some(filter), duration).await?;
+    let (rx, handle) = client.stream_entries(Some(filter), duration).await?;
 
     let initial_ui_filter = if ui_filter_parts.is_empty() {
         None
@@ -212,6 +220,7 @@ async fn handle_tail(
         .with_theme(theme)
         .with_max_logs(config.ui.max_logs)
         .with_filter(initial_ui_filter)
+        .with_stream_handle(handle)
         .with_ai_model_label(active_label);
 
     // Run TUI
@@ -225,12 +234,7 @@ async fn handle_tail(
 async fn handle_projects(impersonate_sa: Option<String>) -> Result<()> {
     println!("{}", "Fetching GCP projects...".dimmed());
 
-    let auth = GcpAuth::with_impersonation(impersonate_sa)
-        .await
-        .context("Authentication failed")?;
-    auth.verify()
-        .await
-        .context("GCP credentials verification failed")?;
+    let auth = init_verified_auth(impersonate_sa).await?;
 
     let client = ProjectsClient::new(auth);
 
@@ -323,19 +327,14 @@ async fn handle_download(
         "Downloading logs"
     );
 
-    let auth = GcpAuth::with_impersonation(impersonate_sa)
-        .await
-        .context("Failed to initialize GCP authentication")?;
-
-    auth.verify()
-        .await
-        .context("Failed to verify GCP authentication")?;
+    let auth = init_verified_auth(impersonate_sa).await?;
 
     println!("✅ Authentication successful!");
 
     let client = LogsClient::new(auth.clone(), args.project.clone());
 
     let options = ExportOptions {
+        format: ExportFormat::from_path(std::path::Path::new(&args.output)),
         limit: args.limit,
         ..Default::default()
     };
@@ -371,10 +370,7 @@ async fn handle_query(
     config: &Config,
     impersonate_sa: Option<String>,
 ) -> Result<()> {
-    let project = args
-        .project
-        .or_else(|| config.defaults.project.clone())
-        .ok_or_else(|| anyhow::anyhow!("Project required. Use --project or set in config file."))?;
+    let project = resolve_project(args.project, config)?;
 
     let since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
     let duration = gcp_racoon::parse_duration_chrono(since_str)
@@ -382,13 +378,7 @@ async fn handle_query(
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
-    let auth = GcpAuth::with_impersonation(impersonate_sa)
-        .await
-        .context("Failed to initialize GCP authentication")?;
-
-    auth.verify()
-        .await
-        .context("GCP credentials verification failed")?;
+    let auth = init_verified_auth(impersonate_sa).await?;
 
     if !args.json {
         println!("✅ Authentication successful!");
@@ -537,10 +527,7 @@ async fn handle_export(
     config: &Config,
     impersonate_sa: Option<String>,
 ) -> Result<()> {
-    let auth = GcpAuth::with_impersonation(impersonate_sa)
-        .await
-        .context("Authentication failed")?;
-    auth.verify().await?;
+    let auth = init_verified_auth(impersonate_sa).await?;
 
     let client = LogsClient::new(auth.clone(), args.project.clone());
 

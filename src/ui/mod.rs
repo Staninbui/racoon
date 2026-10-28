@@ -6,11 +6,13 @@
 pub mod app;
 pub mod input;
 pub mod radar;
+pub mod selector;
 pub mod theme;
 pub mod widgets;
 
 pub use app::{App, InputMode};
 pub use radar::{ErrorCluster, SpikeRadar, fingerprint_message};
+pub use selector::{ModelSelectorState, run_model_selector, select_with_terminal};
 
 use std::io;
 use std::time::Duration;
@@ -21,7 +23,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use tokio::sync::mpsc;
 
-use crate::ai::{GeminiClient, ModelsRegistry, UserIntent, select_with_terminal};
+use crate::ai::{GeminiClient, ModelsRegistry, UserIntent};
 use crate::config::Config;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::ui::theme::Theme;
@@ -285,6 +287,7 @@ async fn restart_live_stream(
             Ok(mut entries) => {
                 // `list_entries` returns newest first; reverse for chronological display (oldest at top)
                 entries.reverse();
+                app.stream_handle = None;
                 app.reset_for_new_stream();
                 for entry in entries {
                     app.add_log(entry);
@@ -308,12 +311,14 @@ async fn restart_live_stream(
     let mut gcp_filter = LogFilter::new().since(lookback);
     if let Some(expr) = filter_expr
         && !expr.trim().is_empty()
+        && !crate::gcp::is_local_only_filter(expr)
     {
         gcp_filter = gcp_filter.raw(expr);
     }
 
     match logs_client.stream_entries(Some(gcp_filter), lookback).await {
-        Ok((new_rx, _handle)) => {
+        Ok((new_rx, new_handle)) => {
+            app.stream_handle = Some(new_handle);
             app.reset_for_new_stream();
             *log_rx = new_rx;
         }
@@ -480,10 +485,7 @@ async fn run_event_loop(
                     app.set_ai_response(text);
                 }
                 AiResponse::FilterSet { filter, message } => {
-                    app.active_trace = None;
-                    app.active_surrounding = None;
-                    app.anchor_log_key = None;
-                    app.previous_filter = None;
+                    app.clear_context_overlay();
                     app.set_filter(Some(filter.clone()));
                     if let Some(lc) = logs_client {
                         restart_live_stream(app, log_rx, lc, Some(&filter)).await;

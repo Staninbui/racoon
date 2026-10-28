@@ -1,93 +1,128 @@
 //! Shared utility functions for racoon.
+//!
+//! Includes duration parsing, AI query sanitization, HTTP client construction
+//! with safe default timeouts, log message fingerprinting, RFC 3986 URL encoding,
+//! and cross-platform clipboard / browser helpers.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::time::Duration as StdDuration;
 
 use chrono::{Duration, Utc};
+use regex::{Captures, Regex};
+use reqwest::Client;
 use tracing::debug;
+
+/// Default TCP connect timeout for outbound HTTP requests (10 seconds).
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 10;
+
+/// Default total request timeout for outbound HTTP requests (30 seconds).
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Construct a shared `reqwest::Client` configured with safe production timeouts
+/// (`connect_timeout = 10s`, `timeout = 30s`) and a standard User-Agent header.
+pub fn default_http_client() -> Client {
+    Client::builder()
+        .user_agent(concat!("gcp-racoon/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(StdDuration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS))
+        .timeout(StdDuration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
+
+/// Normalize a log message into a canonical fingerprint by replacing variable tokens
+/// (UUIDs, IPv4 addresses, timestamps, hex strings, numbers) with placeholders.
+///
+/// Placed in `utils` so both the `ai` layer (compaction & LRU cache) and the `ui`
+/// layer (Error Spike Radar) can share it without reverse module dependencies.
+pub fn fingerprint_message(msg: &str) -> String {
+    static RE_UUID: OnceLock<Regex> = OnceLock::new();
+    static RE_IP: OnceLock<Regex> = OnceLock::new();
+    static RE_ISO_TS: OnceLock<Regex> = OnceLock::new();
+    static RE_HEX: OnceLock<Regex> = OnceLock::new();
+    static RE_NUM: OnceLock<Regex> = OnceLock::new();
+
+    let re_uuid = RE_UUID.get_or_init(|| {
+        Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
+    });
+    let re_ip = RE_IP.get_or_init(|| Regex::new(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b").unwrap());
+    let re_iso_ts = RE_ISO_TS.get_or_init(|| {
+        Regex::new(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b").unwrap()
+    });
+    let re_hex =
+        RE_HEX.get_or_init(|| Regex::new(r"(?i)\b(?:0x[0-9a-f]+|[0-9a-f]{16,})\b").unwrap());
+    let re_num = RE_NUM.get_or_init(|| Regex::new(r"\b\d+").unwrap());
+
+    let s = msg.replace(['\n', '\r'], " ");
+    let s = re_uuid.replace_all(&s, "<UUID>");
+    let s = re_iso_ts.replace_all(&s, "<TS>");
+    let s = re_ip.replace_all(&s, "<IP>");
+    let s = re_hex.replace_all(&s, "<HEX>");
+    let s = re_num.replace_all(&s, "<N>");
+
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 110 {
+        let truncated: String = collapsed.chars().take(107).collect();
+        format!("{}...", truncated)
+    } else {
+        collapsed
+    }
+}
 
 /// Sanitize an AI-generated query to make it valid for GCP Logging API.
 ///
 /// Common issues fixed:
-/// - Removes markdown code blocks
-/// - Converts relative time (e.g., "-2h") to RFC3339 timestamps
-/// - Removes newlines
+/// - Removes markdown code blocks (` ```gcp `, ` ```sql `, ` ```text `, etc.)
+/// - Converts relative time (e.g., `"-2h"`) to RFC3339 timestamps
+/// - Removes newlines and collapses redundant whitespace
 pub fn sanitize_query(query: &str) -> String {
     let mut result = query.trim().to_string();
 
-    // Remove markdown code blocks if present
-    result = result
-        .trim_start_matches("```")
-        .trim_start_matches("gcp")
-        .trim_start_matches("sql")
-        .trim_end_matches("```")
-        .trim()
-        .to_string();
-
-    // Remove newlines
-    result = result.replace(['\n', '\r'], " ");
-
-    // Collapse multiple spaces
-    while result.contains("  ") {
-        result = result.replace("  ", " ");
+    if let Some(stripped) = result.strip_prefix("```") {
+        let stripped = stripped
+            .strip_prefix("gcp")
+            .or_else(|| stripped.strip_prefix("sql"))
+            .or_else(|| stripped.strip_prefix("text"))
+            .or_else(|| stripped.strip_prefix("json"))
+            .unwrap_or(stripped);
+        result = stripped.trim_end_matches("```").trim().to_string();
+    } else if result.ends_with("```") {
+        result = result.trim_end_matches("```").trim().to_string();
     }
+
+    // Collapse newlines and multiple spaces into single spaces
+    result = result.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Fix relative time strings
-    result = fix_relative_timestamps(&result);
-
-    result
+    fix_relative_timestamps(&result)
 }
 
-/// Convert relative time patterns to RFC3339 timestamps.
-///
-/// Handles patterns like:
-/// - "-2h" -> actual timestamp 2 hours ago
-/// - "-1d" -> actual timestamp 1 day ago
-/// - "-30m" -> actual timestamp 30 minutes ago
+/// Convert relative time patterns (`"-2h"`, `"-1d"`, `"-30m"`, `"-45s"`) to RFC3339 timestamps
+/// using a single pre-compiled `OnceLock<Regex>`.
 fn fix_relative_timestamps(query: &str) -> String {
-    let mut result = query.to_string();
+    static RE_REL_TIME: OnceLock<Regex> = OnceLock::new();
+    let re = RE_REL_TIME.get_or_init(|| Regex::new(r#""-(\d+)([hdms])""#).unwrap());
 
-    let patterns = [
-        (r#""-(\d+)h""#, "hours"),
-        (r#""-(\d+)d""#, "days"),
-        (r#""-(\d+)m""#, "minutes"),
-        (r#""-(\d+)s""#, "seconds"),
-    ];
-
-    for (pattern, unit) in patterns {
-        if let Ok(re) = regex::Regex::new(pattern) {
-            let replacements: Vec<(String, String)> = re
-                .captures_iter(&result.clone())
-                .filter_map(|captures| {
-                    let num_match = captures.get(1)?;
-                    let num: i64 = num_match.as_str().parse().ok()?;
-
-                    let duration = match unit {
-                        "hours" => Duration::hours(num),
-                        "days" => Duration::days(num),
-                        "minutes" => Duration::minutes(num),
-                        "seconds" => Duration::seconds(num),
-                        _ => return None,
-                    };
-
-                    let timestamp = Utc::now() - duration;
-                    let rfc3339 = timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
-                    let old_value = captures.get(0)?.as_str().to_string();
-                    let new_value = format!("\"{}\"", rfc3339);
-
-                    Some((old_value, new_value))
-                })
-                .collect();
-
-            for (old_value, new_value) in replacements {
-                debug!(old = %old_value, new = %new_value, "Converted relative timestamp");
-                result = result.replace(&old_value, &new_value);
-            }
-        }
-    }
-
-    result
+    let now = Utc::now();
+    re.replace_all(query, |caps: &Captures| {
+        let Ok(num) = caps[1].parse::<i64>() else {
+            return caps[0].to_string();
+        };
+        let duration = match &caps[2] {
+            "h" => Duration::hours(num),
+            "d" => Duration::days(num),
+            "m" => Duration::minutes(num),
+            "s" => Duration::seconds(num),
+            _ => return caps[0].to_string(),
+        };
+        let timestamp = now - duration;
+        let rfc3339 = timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let new_value = format!("\"{}\"", rfc3339);
+        debug!(old = %&caps[0], new = %new_value, "Converted relative timestamp");
+        new_value
+    })
+    .into_owned()
 }
 
 /// parse time range syntax like `1h`, `5m`, `30s`
@@ -107,7 +142,6 @@ fn fix_relative_timestamps(query: &str) -> String {
 ///
 /// Returns an error string if the input is empty, contains an invalid number,
 /// or uses an unknown unit.
-///
 pub fn parse_duration(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim();
     let mut chars = s.chars();
@@ -285,6 +319,16 @@ mod tests {
     fn test_parse_duration_chrono() {
         let dur = parse_duration_chrono("1h").unwrap();
         assert_eq!(dur.num_seconds(), 3600);
+    }
+
+    #[test]
+    fn test_sanitize_query_strips_fences_and_resolves_relative_timestamps() {
+        let raw = "```gcp\nseverity>=ERROR\n  timestamp>=\"-2h\"\n```";
+        let sanitized = sanitize_query(raw);
+        assert!(sanitized.starts_with("severity>=ERROR timestamp>=\"20"));
+        assert!(sanitized.ends_with("Z\""));
+        assert!(!sanitized.contains("```"));
+        assert!(!sanitized.contains("-2h"));
     }
 
     #[test]

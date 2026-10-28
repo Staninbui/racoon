@@ -249,12 +249,7 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             }
             app.clear_search();
             app.clear_ai_response();
-            if app.active_surrounding.is_some() {
-                let restored = app.exit_surrounding_context();
-                return Action::ApplyFilter(restored);
-            }
-            if app.active_trace.is_some() {
-                let restored = app.exit_trace_context();
+            if let Some(restored) = app.exit_active_overlay() {
                 return Action::ApplyFilter(restored);
             }
             let had_filter = app.filter.is_some();
@@ -297,10 +292,7 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
 
             match mode {
                 InputMode::Filter => {
-                    app.active_trace = None;
-                    app.active_surrounding = None;
-                    app.anchor_log_key = None;
-                    app.previous_filter = None;
+                    app.clear_context_overlay();
                     app.set_filter(Some(text.clone()));
                     Action::ApplyFilter(Some(text))
                 }
@@ -424,6 +416,50 @@ mod tests {
         handle_key_event(&mut app, make_key(KeyCode::Enter));
         assert!(!app.show_radar);
         assert_eq!(app.logs.len(), 1);
+
+        // Pressing Esc after drilling into a cluster must restore the previous log list / filter
+        handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert_eq!(app.logs.len(), 2);
+    }
+
+    #[test]
+    fn test_radar_drilldown_preserves_and_restores_previous_filter() {
+        let mut app = App::new("test".to_string()).with_offline_logs(vec![
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Redis connection failed on port 6379".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("WARNING".to_string()),
+                text_payload: Some("High memory usage 85%".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Request completed".to_string()),
+                ..Default::default()
+            },
+        ]);
+
+        // Start with severity>=WARNING (2 logs visible)
+        app.set_filter(Some("severity>=WARNING".to_string()));
+        assert_eq!(app.logs.len(), 2);
+
+        // Open Radar ('c') and drill into top cluster ('Enter') -> 1 log visible
+        handle_key_event(&mut app, make_key(KeyCode::Char('c')));
+        handle_key_event(&mut app, make_key(KeyCode::Enter));
+        assert!(!app.show_radar);
+        assert_eq!(app.logs.len(), 1);
+
+        // Press Esc -> should restore previous filter ("severity>=WARNING", 2 logs visible)
+        let esc_action = handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(
+            esc_action,
+            Action::ApplyFilter(Some(ref f)) if f == "severity>=WARNING"
+        ));
+        assert_eq!(app.filter.as_deref(), Some("severity>=WARNING"));
+        assert_eq!(app.logs.len(), 2);
     }
 
     #[test]

@@ -55,6 +55,20 @@ Provide concisely (max 240 words):
     )
 }
 
+/// Generate a prompt for classifying user input intent and synthesizing a GCP filter query in one LLM call.
+pub fn detect_intent_prompt(input: &str) -> String {
+    format!(
+        r#"Classify user input for GCP Cloud Logging and synthesize a GCP filter query if applicable.
+Input: "{input}"
+Intents:
+- QUESTION: asking about logs (include "gcp_query" to fetch relevant logs)
+- SET_FILTER: changing active filter
+- GENERATE_QUERY: requesting query syntax
+Return JSON only:
+{{"intent":"QUESTION"|"SET_FILTER"|"GENERATE_QUERY","gcp_query":"<valid GCP filter>","description":"<short note>"}}"#
+    )
+}
+
 /// Generate a prompt for suggesting filters based on current log content.
 ///
 /// # Arguments

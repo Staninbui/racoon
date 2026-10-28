@@ -4,10 +4,8 @@
 //! in `WARNING` / `ERROR` / `CRITICAL` log messages to cluster repetitive error storms
 //! into canonical patterns and render a real-time Unicode velocity sparkline.
 
-use regex::Regex;
-use std::sync::OnceLock;
-
 use crate::gcp::LogEntry;
+pub use crate::utils::fingerprint_message;
 
 /// A clustered group of logs sharing the same normalized error fingerprint.
 #[derive(Debug, Clone)]
@@ -180,42 +178,6 @@ impl SpikeRadar {
                 self.sparkline()
             )
         }
-    }
-}
-
-/// Normalize a log message into a canonical fingerprint by replacing variable tokens
-/// (UUIDs, IPv4 addresses, timestamps, hex strings, numbers) with placeholders.
-pub fn fingerprint_message(msg: &str) -> String {
-    static RE_UUID: OnceLock<Regex> = OnceLock::new();
-    static RE_IP: OnceLock<Regex> = OnceLock::new();
-    static RE_ISO_TS: OnceLock<Regex> = OnceLock::new();
-    static RE_HEX: OnceLock<Regex> = OnceLock::new();
-    static RE_NUM: OnceLock<Regex> = OnceLock::new();
-
-    let re_uuid = RE_UUID.get_or_init(|| {
-        Regex::new(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b").unwrap()
-    });
-    let re_ip = RE_IP.get_or_init(|| Regex::new(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b").unwrap());
-    let re_iso_ts = RE_ISO_TS.get_or_init(|| {
-        Regex::new(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\b").unwrap()
-    });
-    let re_hex =
-        RE_HEX.get_or_init(|| Regex::new(r"(?i)\b(?:0x[0-9a-f]+|[0-9a-f]{16,})\b").unwrap());
-    let re_num = RE_NUM.get_or_init(|| Regex::new(r"\b\d+").unwrap());
-
-    let s = msg.replace(['\n', '\r'], " ");
-    let s = re_uuid.replace_all(&s, "<UUID>");
-    let s = re_iso_ts.replace_all(&s, "<TS>");
-    let s = re_ip.replace_all(&s, "<IP>");
-    let s = re_hex.replace_all(&s, "<HEX>");
-    let s = re_num.replace_all(&s, "<N>");
-
-    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() > 110 {
-        let truncated: String = collapsed.chars().take(107).collect();
-        format!("{}...", truncated)
-    } else {
-        collapsed
     }
 }
 
