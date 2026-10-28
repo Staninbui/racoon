@@ -180,7 +180,8 @@ racoon auth
 | `auth` | Verify authentication status |
 | `export` | Export logs to a file |
 | `download` | Quick download logs |
-| `view` | View logs from a local file (interactive TUI or `--no-tui`) |
+| `view` | View logs from a local file or `stdin` (`racoon view -`, supports JSON, NDJSON & plain text) |
+| `diff` | Compare error fingerprints between two time windows or log files to detect release regressions |
 | `models` | Interactively select, list, or update AI models (Google, OpenAI, Anthropic, Agnes AI) |
 | `update` | Check for racoon updates and overwrite/refresh the AI models registry |
 | `config` | Manage configuration |
@@ -203,6 +204,7 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `PageUp` | Skip 10 logs up |
 | `Tab` / `Shift+Tab` | Cycle keyboard focus across **Logs**, **Detail**, and **AI** panes |
 | `z` | Toggle **Full-Screen Maximize** for the currently focused pane (`Esc` to restore) |
+| `b` | Cycle **Saved Filter Bookmarks** (`[bookmarks]` in `config.toml` + built-in SRE presets) |
 | `c` | Toggle **Error Fingerprint & Spike Radar** (`Enter` to drill into selected cluster) |
 | `-` | **Mute / Exclude** the selected noisy log pattern (`-fingerprint:"..."`, `Esc` to restore) |
 | `s` | Toggle **Surrounding Logs Context** on the same resource instance (`🎯` marks anchor log) |
@@ -214,7 +216,7 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `y` | Copy selected log JSON (or Error Cluster summary + JSON) to clipboard |
 | `Y` (`Shift+y`) | Copy AI analysis / RCA Markdown report to clipboard |
 | `o` | Open selected log entry in **Google Cloud Logs Explorer** in browser |
-| `?` | Ask AI a question (or set filters in natural language) |
+| `?` | Ask AI a question, **follow up on the active AI diagnosis**, or set filters in natural language |
 | `m` | Open interactive AI Provider & Model selector |
 | `/` | Search within logs (`↑` / `↓` cycles persistent history at `~/.config/racoon/history.json`) |
 | `n` | Next search match |
@@ -273,6 +275,13 @@ racoon export --project my-project --output logs.ndjson --format ndjson
 
 # View exported logs offline (opens interactive TUI by default, or use --no-tui)
 racoon view logs.json
+
+# Pipe logs from stdin (kubectl, docker, gcloud, or plain text)
+kubectl logs deploy/payment-api --tail=200 | racoon view - --no-tui
+
+# Compare error fingerprints before and after a deployment (GCP windows or local files)
+racoon diff --project my-project --baseline 2h..1h --current 1h..now --ai
+racoon diff --baseline-file before.json --current-file after.json
 ```
 
 ### Configuration

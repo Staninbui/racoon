@@ -78,13 +78,41 @@ pub struct ImportResult {
 pub fn import_logs(input_path: impl AsRef<Path>) -> Result<ImportResult, ImportError> {
     let input_path = input_path.as_ref();
 
+    if input_path == Path::new("-") {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf)?;
+        return import_logs_from_str(&buf, "stdin");
+    }
+
     info!(path = %input_path.display(), "Importing logs");
+
+    let ext = input_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if matches!(ext.as_str(), "log" | "txt") {
+        let content = std::fs::read_to_string(input_path)?;
+        return import_logs_from_str(&content, &input_path.to_string_lossy());
+    }
 
     // Detect format
     let format = ExportFormat::from_path(input_path);
 
     let (entries, errors) = match format {
-        ExportFormat::Json => (import_json(input_path)?, 0),
+        ExportFormat::Json => match import_json(input_path) {
+            Ok(items) => (items, 0),
+            Err(json_err) => {
+                // Fallback to line-based NDJSON / plain-text parser if file isn't a single JSON document
+                if let Ok(raw) = std::fs::read_to_string(input_path)
+                    && let Ok(fallback) = import_logs_from_str(&raw, &input_path.to_string_lossy())
+                {
+                    return Ok(fallback);
+                }
+                return Err(json_err);
+            }
+        },
         ExportFormat::Ndjson => import_ndjson(input_path)?,
     };
 
@@ -108,6 +136,157 @@ pub fn import_logs(input_path: impl AsRef<Path>) -> Result<ImportResult, ImportE
         count,
         errors,
     })
+}
+
+/// Import logs from an in-memory string (supports JSON array, wrapped JSON, NDJSON, and plain-text log lines).
+///
+/// Used by `racoon view -` (`stdin` pipe) and plain-text `.log` / `.txt` files.
+pub fn import_logs_from_str(
+    content: &str,
+    source_label: &str,
+) -> Result<ImportResult, ImportError> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(ImportError::Empty);
+    }
+
+    // 1. Try parsing as a complete JSON document (array, wrapped `{"entries": [...]}`, or single object)
+    if (trimmed.starts_with('[') || trimmed.starts_with('{'))
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        if let Some(entries_val) = value.get("entries") {
+            let entries: Vec<LogEntry> =
+                serde_json::from_value(entries_val.clone()).map_err(|e| ImportError::Parse {
+                    line: 0,
+                    message: format!("Failed to parse entries array: {}", e),
+                })?;
+            if entries.is_empty() {
+                return Err(ImportError::Empty);
+            }
+            let count = entries.len();
+            return Ok(ImportResult {
+                entries,
+                path: source_label.to_string(),
+                format: ExportFormat::Json,
+                count,
+                errors: 0,
+            });
+        }
+        if value.is_array() {
+            let entries: Vec<LogEntry> =
+                serde_json::from_value(value).map_err(|e| ImportError::Parse {
+                    line: 0,
+                    message: format!("Failed to parse JSON array: {}", e),
+                })?;
+            if entries.is_empty() {
+                return Err(ImportError::Empty);
+            }
+            let count = entries.len();
+            return Ok(ImportResult {
+                entries,
+                path: source_label.to_string(),
+                format: ExportFormat::Json,
+                count,
+                errors: 0,
+            });
+        }
+        if value.is_object() {
+            let entry: LogEntry =
+                serde_json::from_value(value).map_err(|e| ImportError::Parse {
+                    line: 0,
+                    message: format!("Failed to parse JSON log entry: {}", e),
+                })?;
+            return Ok(ImportResult {
+                entries: vec![entry],
+                path: source_label.to_string(),
+                format: ExportFormat::Json,
+                count: 1,
+                errors: 0,
+            });
+        }
+    }
+
+    // 2. Line-by-line NDJSON or plain-text log stream (`kubectl logs`, `docker logs`, `gcloud`)
+    let mut entries = Vec::new();
+    for (idx, raw_line) in trimmed.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('{')
+            && let Ok(entry) = serde_json::from_str::<LogEntry>(line)
+        {
+            entries.push(entry);
+            continue;
+        }
+        entries.push(parse_plain_text_log_line(line, idx + 1));
+    }
+
+    if entries.is_empty() {
+        return Err(ImportError::Empty);
+    }
+
+    let count = entries.len();
+    Ok(ImportResult {
+        entries,
+        path: source_label.to_string(),
+        format: ExportFormat::Ndjson,
+        count,
+        errors: 0,
+    })
+}
+
+/// Parse a single unstructured / plain-text log line into a [`LogEntry`], extracting
+/// leading RFC3339/ISO timestamps and standard severity tokens (`ERROR`, `WARN`, `INFO`, `DEBUG`, `CRITICAL`).
+pub fn parse_plain_text_log_line(line: &str, line_num: usize) -> LogEntry {
+    let mut rest = line.trim();
+    let mut timestamp = None;
+
+    // Check if the first token is an RFC3339 timestamp (e.g. `2026-10-28T12:00:01Z`)
+    if let Some((first, after_first)) = rest.split_once(char::is_whitespace)
+        && let Ok(dt) =
+            chrono::DateTime::parse_from_rfc3339(first.trim_matches(|c| c == '[' || c == ']'))
+    {
+        timestamp = Some(dt.with_timezone(&chrono::Utc));
+        rest = after_first.trim_start();
+    }
+
+    // Check if the next token is a severity keyword (`ERROR`, `[WARN]`, `INFO:`, etc.)
+    let mut severity = "INFO".to_string();
+    if let Some(first_word) = rest.split_whitespace().next() {
+        let clean = first_word
+            .trim_matches(|c: char| matches!(c, '[' | ']' | '(' | ')' | ':'))
+            .to_uppercase();
+        let matched_sev = match clean.as_str() {
+            "DEBUG" | "TRACE" => Some("DEBUG"),
+            "INFO" => Some("INFO"),
+            "NOTICE" => Some("NOTICE"),
+            "WARN" | "WARNING" => Some("WARNING"),
+            "ERR" | "ERROR" => Some("ERROR"),
+            "CRIT" | "CRITICAL" | "FATAL" | "PANIC" => Some("CRITICAL"),
+            "ALERT" => Some("ALERT"),
+            "EMERG" | "EMERGENCY" => Some("EMERGENCY"),
+            _ => None,
+        };
+        if let Some(sev) = matched_sev {
+            severity = sev.to_string();
+            rest = rest[first_word.len()..].trim_start();
+        }
+    }
+
+    let message_text = if rest.is_empty() {
+        line.trim().to_string()
+    } else {
+        rest.to_string()
+    };
+
+    LogEntry {
+        insert_id: Some(format!("line-{}", line_num)),
+        timestamp,
+        severity: Some(severity),
+        text_payload: Some(message_text),
+        ..Default::default()
+    }
 }
 
 /// Import from JSON format.
@@ -271,5 +450,25 @@ mod tests {
 
         let result = import_logs_limited(&path, 10).unwrap();
         assert_eq!(result.count, 10);
+    }
+
+    #[test]
+    fn test_import_logs_from_str_json_ndjson_and_plain_text() {
+        let plain_logs = "\
+2026-10-28T12:00:01Z ERROR [payment-svc] Connection refused to 10.0.0.1:5432
+2026-10-28T12:00:02Z WARN Retrying request 1/3
+Just a plain stdout line without timestamp";
+
+        let res = import_logs_from_str(plain_logs, "stdin").unwrap();
+        assert_eq!(res.count, 3);
+        assert_eq!(res.entries[0].severity_or_default(), "ERROR");
+        assert!(
+            res.entries[0]
+                .message()
+                .contains("Connection refused to 10.0.0.1:5432")
+        );
+        assert!(res.entries[0].timestamp.is_some());
+        assert_eq!(res.entries[1].severity_or_default(), "WARNING");
+        assert_eq!(res.entries[2].severity_or_default(), "INFO");
     }
 }

@@ -526,6 +526,53 @@ impl AiClient {
         }
     }
 
+    /// Answer a contextual follow-up question (`?` key) building upon a previous AI diagnosis
+    /// and the currently selected log entry / buffered trace logs without losing conversational state.
+    pub async fn ask_followup(
+        &self,
+        question: &str,
+        previous_analysis: &str,
+        selected_log: Option<&LogEntry>,
+        local_logs: &[LogEntry],
+    ) -> Result<String, AiError> {
+        let (raw_context, compaction_stats) = if let Some(entry) = selected_log
+            && local_logs.len() <= 1
+        {
+            compact_log_for_ai(entry)
+        } else if !local_logs.is_empty() {
+            compact_logs_for_rca(local_logs, 12)
+        } else if let Some(entry) = selected_log {
+            compact_log_for_ai(entry)
+        } else {
+            ("No active logs.".to_string(), Default::default())
+        };
+
+        let (scrubbed_context, redact_stats) = if self.redact_pii {
+            redact_sensitive_text(&raw_context)
+        } else {
+            (raw_context, RedactionStats::default())
+        };
+
+        let (scrubbed_prev, _) = if self.redact_pii {
+            redact_sensitive_text(previous_analysis)
+        } else {
+            (previous_analysis.to_string(), RedactionStats::default())
+        };
+
+        let prompt = prompts::followup_question_prompt(question, &scrubbed_prev, &scrubbed_context);
+        let answer = self.generate_with_max_tokens(&prompt, 480).await?;
+
+        let mut banners = vec!["💬 Contextual Follow-up (retained active diagnosis)".to_string()];
+        if let Some(b) = compaction_stats.badge() {
+            banners.push(b);
+        }
+        if let Some(b) = redact_stats.banner() {
+            banners.push(b);
+        }
+
+        Ok(format!("{}\n\n{}", banners.join("\n"), answer))
+    }
+
     /// Quick check for errors in a time range.
     pub async fn check_for_errors(
         &self,

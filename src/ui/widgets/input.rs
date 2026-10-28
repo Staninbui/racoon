@@ -86,8 +86,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         let hints_text = "\
-j/k: Nav │ Tab/z: Focus/Max │ s: ±5s Context │ c: Radar │ -: Mute │ x: Trace │ e/E: AI Explain/RCA │ w: Incident Report
-/: Search │ f: Filter │ y/Y: Copy │ o: Open GCP │ ?: Ask AI │ m: Model │ p: Pause │ t: Theme │ Esc: Clear │ q: Quit";
+j/k: Nav │ Tab/z: Focus/Max │ b: Bookmark │ -: Mute │ s: ±5s Context │ c: Radar │ x: Trace │ e/E: AI Explain/RCA │ w: Report
+/: Search │ f: Filter │ y/Y: Copy │ o: Open GCP │ ?: Ask AI / Follow-up │ m: Model │ p: Pause │ t: Theme │ Esc: Clear │ q: Quit";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()
                 .borders(Borders::ALL)

@@ -123,6 +123,35 @@ Your answer:"#,
     )
 }
 
+/// Generate a prompt for answering a multi-turn follow-up question in the context of
+/// a previous AI analysis / RCA and the active log/trace buffer.
+pub fn followup_question_prompt(
+    question: &str,
+    previous_analysis: &str,
+    logs_context: &str,
+) -> String {
+    format!(
+        r#"You are a Senior GCP SRE continuing an active incident investigation.
+
+## Previous AI Diagnosis
+{previous_analysis}
+
+## Active Log / Trace Context
+```
+{logs_context}
+```
+
+## Engineer's Follow-up Question
+"{question}"
+
+## Instructions
+1. Answer in the SAME LANGUAGE as the engineer's follow-up question
+2. Directly build upon the Previous AI Diagnosis and Active Log Context
+3. Provide concrete commands, configuration snippets, or root-cause clarifications
+4. Keep response under 200 words, no filler"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +175,17 @@ mod tests {
         let prompt = analyze_logs_prompt("log1\n---\nlog2");
         assert!(prompt.contains("Timeline Summary"));
         assert!(prompt.contains("Root Cause"));
+    }
+
+    #[test]
+    fn test_followup_question_prompt_retains_previous_analysis() {
+        let prompt = followup_question_prompt(
+            "How do I increase HikariCP pool size?",
+            "### Root Cause\nHikariCP pool exhausted",
+            "[12:00:01] [ERROR] HikariPool-1 - Connection is not available",
+        );
+        assert!(prompt.contains("How do I increase HikariCP pool size?"));
+        assert!(prompt.contains("HikariCP pool exhausted"));
+        assert!(prompt.contains("HikariPool-1"));
     }
 }

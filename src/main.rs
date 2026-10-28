@@ -17,8 +17,8 @@ use tracing_subscriber::FmtSubscriber;
 
 use gcp_racoon::ai::{GeminiClient, ModelsRegistry, ProviderKind, run_model_selector};
 use gcp_racoon::cli::{
-    Cli, Commands, ConfigAction, ConfigArgs, DownloadArgs, ExportArgs, ModelsAction, ModelsArgs,
-    QueryArgs, TailArgs, ViewArgs,
+    Cli, Commands, ConfigAction, ConfigArgs, DiffArgs, DownloadArgs, ExportArgs, ModelsAction,
+    ModelsArgs, QueryArgs, TailArgs, ViewArgs,
 };
 use gcp_racoon::config::Config;
 use gcp_racoon::gcp::{GcpAuth, LogFilter, LogsClient, ProjectsClient};
@@ -26,7 +26,7 @@ use gcp_racoon::storage::{
     ExportFormat, ExportOptions, export_logs, export_logs_with_ai, import_logs,
 };
 use gcp_racoon::ui::theme::Theme;
-use gcp_racoon::ui::{App, run_app};
+use gcp_racoon::ui::{App, compute_log_diff, run_app};
 use gcp_racoon::utils::sanitize_query;
 
 #[tokio::main]
@@ -34,13 +34,24 @@ async fn main() -> Result<()> {
     // parse command line arguments
     let cli = Cli::parse();
 
-    // load config
-    let config = Config::load();
+    // load config and apply optional `--profile <name>`
+    let mut config = Config::load();
+    let active_profile = if let Some(ref prof_name) = cli.profile {
+        Some(
+            config
+                .apply_profile(prof_name)
+                .map_err(|e| anyhow::anyhow!(e))?,
+        )
+    } else {
+        None
+    };
 
     // Determine whether this command will enter interactive TUI mode
     let is_tui = match &cli.command {
         Commands::Tail(_) => true,
-        Commands::View(args) => !args.json && !args.no_tui && std::io::stdout().is_terminal(),
+        Commands::View(args) => {
+            args.file != "-" && !args.json && !args.no_tui && std::io::stdout().is_terminal()
+        }
         Commands::Models(args) => matches!(args.action, None | Some(ModelsAction::Select)),
         _ => false,
     };
@@ -58,18 +69,46 @@ async fn main() -> Result<()> {
         info!("racoon starting up 🦝");
     }
 
-    // Resolve optional IAM service account impersonation (CLI flag > env var > config)
+    // Resolve optional IAM service account impersonation (CLI flag > env var > profile/config)
     let impersonate_sa =
         config.resolve_impersonate_service_account(cli.impersonate_service_account.as_deref());
 
+    let profile_filter = active_profile.and_then(|p| p.filter);
+
     // Dispatch to command handlers
     let result = match cli.command {
-        Commands::Tail(args) => handle_tail(args, &config, impersonate_sa).await,
+        Commands::Tail(mut args) => {
+            if args.filter.is_none() {
+                args.filter = profile_filter;
+            }
+            handle_tail(args, &config, impersonate_sa).await
+        }
         Commands::Projects => handle_projects(impersonate_sa).await,
         Commands::Auth => handle_auth(impersonate_sa).await,
-        Commands::Download(args) => handle_download(args, &config, impersonate_sa).await,
-        Commands::Query(args) => handle_query(args, &config, impersonate_sa).await,
-        Commands::Export(args) => handle_export(args, &config, impersonate_sa).await,
+        Commands::Download(mut args) => {
+            if args.filter.is_none() {
+                args.filter = profile_filter;
+            }
+            handle_download(args, &config, impersonate_sa).await
+        }
+        Commands::Query(mut args) => {
+            if args.filter.is_none() {
+                args.filter = profile_filter;
+            }
+            handle_query(args, &config, impersonate_sa).await
+        }
+        Commands::Export(mut args) => {
+            if args.filter.is_none() {
+                args.filter = profile_filter;
+            }
+            handle_export(args, &config, impersonate_sa).await
+        }
+        Commands::Diff(mut args) => {
+            if args.filter.is_none() {
+                args.filter = profile_filter;
+            }
+            handle_diff(args, &config, impersonate_sa).await
+        }
         Commands::View(args) => handle_view(args, &config).await,
         Commands::Config(args) => handle_config(args),
         Commands::Models(args) => handle_models(args, &config).await,
@@ -254,6 +293,7 @@ async fn handle_tail(
         .with_theme(theme)
         .with_max_logs(config.ui.max_logs)
         .with_filter(initial_ui_filter)
+        .with_bookmarks(config.effective_bookmarks())
         .with_stream_handle(handle)
         .with_ai_model_label(active_label);
 
@@ -516,7 +556,7 @@ async fn handle_view(args: ViewArgs, config: &Config) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&entries_to_show)?);
     } else if result.entries.is_empty() {
         println!("\n(no entries to display)");
-    } else if !args.no_tui && std::io::stdout().is_terminal() {
+    } else if args.file != "-" && !args.no_tui && std::io::stdout().is_terminal() {
         let entries_to_show: Vec<_> = result.entries.into_iter().take(args.limit).collect();
         let theme = Theme::parse(&config.ui.theme);
         let gemini = GeminiClient::from_config(config).ok();
@@ -526,6 +566,7 @@ async fn handle_view(args: ViewArgs, config: &Config) -> Result<()> {
         let app = App::new(format!("file:{}", args.file))
             .with_theme(theme)
             .with_max_logs(config.ui.max_logs.max(entries_to_show.len()))
+            .with_bookmarks(config.effective_bookmarks())
             .with_offline_logs(entries_to_show)
             .with_ai_model_label(active_label);
 
@@ -631,6 +672,120 @@ async fn handle_export(
     println!("   Entries: {}", result.count);
     println!("   Size: {} bytes", result.size_bytes);
     println!("   File: {}", result.path);
+
+    Ok(())
+}
+
+/// Parse a window specification like `"2h..1h"`, `"1h..now"`, or `"30m"` into a [`LogFilter`].
+fn parse_diff_window_filter(window_spec: &str, extra_filter: Option<&str>) -> Result<LogFilter> {
+    let mut filter = LogFilter::new();
+    let trimmed = window_spec.trim();
+
+    if let Some((start_str, end_str)) = trimmed.split_once("..") {
+        let from_dt = gcp_racoon::parse_timestamp_input(start_str)
+            .map_err(|e| anyhow::anyhow!("Invalid window start '{}': {}", start_str, e))?;
+        filter = filter.timestamp_at_or_after(from_dt);
+
+        let end_trimmed = end_str.trim();
+        if !end_trimmed.is_empty() && !end_trimmed.eq_ignore_ascii_case("now") {
+            let to_dt = gcp_racoon::parse_timestamp_input(end_trimmed)
+                .map_err(|e| anyhow::anyhow!("Invalid window end '{}': {}", end_trimmed, e))?;
+            filter = filter.timestamp_before(to_dt);
+        }
+    } else {
+        let from_dt = gcp_racoon::parse_timestamp_input(trimmed)
+            .map_err(|e| anyhow::anyhow!("Invalid window '{}': {}", trimmed, e))?;
+        filter = filter.timestamp_at_or_after(from_dt);
+    }
+
+    if let Some(extra) = extra_filter
+        && !extra.trim().is_empty()
+    {
+        filter = filter.raw(extra.trim());
+    } else {
+        filter = filter.severity_min("WARNING");
+    }
+
+    Ok(filter)
+}
+
+/// Handle `racoon diff` - compare error fingerprints between two files or GCP time windows.
+async fn handle_diff(
+    args: DiffArgs,
+    config: &Config,
+    impersonate_sa: Option<String>,
+) -> Result<()> {
+    let (baseline_entries, current_entries, base_label, curr_label) =
+        if let (Some(base_path), Some(curr_path)) = (&args.baseline_file, &args.current_file) {
+            let base_res =
+                import_logs(base_path).context("Failed to import --baseline-file logs")?;
+            let curr_res =
+                import_logs(curr_path).context("Failed to import --current-file logs")?;
+            (
+                base_res.entries,
+                curr_res.entries,
+                base_path.clone(),
+                curr_path.clone(),
+            )
+        } else {
+            let project = resolve_project(args.project.clone(), config)?;
+            let base_spec = args.baseline.as_deref().unwrap_or("2h..1h");
+            let curr_spec = args.current.as_deref().unwrap_or("1h..now");
+
+            let base_filter = parse_diff_window_filter(base_spec, args.filter.as_deref())?;
+            let curr_filter = parse_diff_window_filter(curr_spec, args.filter.as_deref())?;
+
+            let auth = init_verified_auth(impersonate_sa).await?;
+            let client = LogsClient::new(auth, project);
+
+            if !args.json {
+                println!(
+                    "🔍 Comparing GCP error fingerprints: baseline ({}) vs current ({})...",
+                    base_spec, curr_spec
+                );
+            }
+
+            let (base_logs, curr_logs) = tokio::try_join!(
+                client.list_entries(Some(&base_filter), args.limit),
+                client.list_entries(Some(&curr_filter), args.limit)
+            )?;
+
+            (
+                base_logs,
+                curr_logs,
+                base_spec.to_string(),
+                curr_spec.to_string(),
+            )
+        };
+
+    let report = compute_log_diff(&baseline_entries, &current_entries);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let formatted = report.format_report(&base_label, &curr_label);
+    println!("\n{}", formatted);
+
+    if args.ai {
+        let gemini = GeminiClient::from_config(config)
+            .context("AI diff summary requires configured AI credentials")?;
+        println!(
+            "🤖 Requesting AI release risk summary ({}/{})...\n",
+            gemini.provider().id(),
+            gemini.model()
+        );
+        let summary = gemini
+            .ask_followup(
+                "Summarize the deployment regression risk from this diff and recommend whether to roll back or proceed.",
+                &formatted,
+                None,
+                &current_entries,
+            )
+            .await?;
+        println!("{}", summary);
+    }
 
     Ok(())
 }

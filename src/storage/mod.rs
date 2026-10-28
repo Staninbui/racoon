@@ -41,4 +41,7 @@ pub mod import;
 
 pub use export::{ExportOptions, ExportResult, export_logs, export_logs_with_ai};
 pub use formats::ExportFormat;
-pub use import::{ImportResult, import_logs};
+pub use import::{
+    ImportError, ImportResult, import_logs, import_logs_from_str, import_logs_limited,
+    parse_plain_text_log_line,
+};

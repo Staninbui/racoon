@@ -4,8 +4,210 @@
 //! in `WARNING` / `ERROR` / `CRITICAL` log messages to cluster repetitive error storms
 //! into canonical patterns and render a real-time Unicode velocity sparkline.
 
+use serde::{Deserialize, Serialize};
+
 use crate::gcp::LogEntry;
 pub use crate::utils::fingerprint_message;
+
+/// Comparison metrics for a single normalized error/warning fingerprint between two windows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiffPatternEntry {
+    /// Canonical normalized fingerprint (`<UUID>`, `<IP>`, `<N>`, etc.).
+    pub fingerprint: String,
+    /// Highest severity observed (`WARNING`, `ERROR`, `CRITICAL`, etc.).
+    pub severity: String,
+    /// Occurrence count in the baseline window.
+    pub baseline_count: usize,
+    /// Occurrence count in the current/candidate window.
+    pub current_count: usize,
+    /// Representative sample log message.
+    pub sample_message: String,
+}
+
+/// Structured diff report comparing error/warning fingerprints between a baseline and current dataset (`racoon diff`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LogDiffReport {
+    /// Total log entries inspected in the baseline window.
+    pub baseline_total_logs: usize,
+    /// Total log entries inspected in the current window.
+    pub current_total_logs: usize,
+    /// Total warning/error/critical entries in the baseline window.
+    pub baseline_error_logs: usize,
+    /// Total warning/error/critical entries in the current window.
+    pub current_error_logs: usize,
+    /// Brand-new error patterns (`0` in baseline -> `>= 1` in current).
+    pub new_patterns: Vec<DiffPatternEntry>,
+    /// Existing patterns whose frequency spiked (`current > baseline` by `>= 50%` and `+2` occurrences).
+    pub regressed_patterns: Vec<DiffPatternEntry>,
+    /// Patterns present in baseline that disappeared in current (`>= 1` in baseline -> `0` in current).
+    pub resolved_patterns: Vec<DiffPatternEntry>,
+    /// Patterns present in both without a significant spike.
+    pub unchanged_patterns: Vec<DiffPatternEntry>,
+}
+
+impl LogDiffReport {
+    /// Return `true` if any brand-new error patterns or frequency regressions were detected.
+    pub fn has_regressions(&self) -> bool {
+        !self.new_patterns.is_empty() || !self.regressed_patterns.is_empty()
+    }
+
+    /// Format a human-readable Markdown / terminal report of the fingerprint diff.
+    pub fn format_report(&self, baseline_label: &str, current_label: &str) -> String {
+        let mut out = String::with_capacity(2048);
+        let verdict = if self.has_regressions() {
+            "🚨 REGRESSIONS DETECTED"
+        } else {
+            "✅ NO NEW REGRESSIONS"
+        };
+
+        out.push_str(&format!(
+            "# 🦝 Racoon Release & Window Diff — {}\n\n",
+            verdict
+        ));
+        out.push_str(&format!(
+            "- **Baseline (`{}`)**: {} logs ({} errors/warnings)\n",
+            baseline_label, self.baseline_total_logs, self.baseline_error_logs
+        ));
+        out.push_str(&format!(
+            "- **Current  (`{}`)**: {} logs ({} errors/warnings)\n\n",
+            current_label, self.current_total_logs, self.current_error_logs
+        ));
+
+        out.push_str(&format!(
+            "## 🆕 New Error Patterns ({})\n",
+            self.new_patterns.len()
+        ));
+        if self.new_patterns.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for p in &self.new_patterns {
+                out.push_str(&format!(
+                    "  - 🚨 [0 → {}] [{}] {}\n",
+                    p.current_count, p.severity, p.fingerprint
+                ));
+            }
+        }
+        out.push('\n');
+
+        out.push_str(&format!(
+            "## 📈 Regressed / Spiking Patterns ({})\n",
+            self.regressed_patterns.len()
+        ));
+        if self.regressed_patterns.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for p in &self.regressed_patterns {
+                out.push_str(&format!(
+                    "  - 🔥 [{} → {}] [{}] {}\n",
+                    p.baseline_count, p.current_count, p.severity, p.fingerprint
+                ));
+            }
+        }
+        out.push('\n');
+
+        out.push_str(&format!(
+            "## ✅ Resolved Patterns ({})\n",
+            self.resolved_patterns.len()
+        ));
+        if self.resolved_patterns.is_empty() {
+            out.push_str("  (none)\n");
+        } else {
+            for p in &self.resolved_patterns {
+                out.push_str(&format!(
+                    "  - ✅ [{} → 0] [{}] {}\n",
+                    p.baseline_count, p.severity, p.fingerprint
+                ));
+            }
+        }
+
+        out
+    }
+}
+
+/// Compare two slices of `LogEntry` items (`baseline` vs `current`) by their normalized
+/// error/warning fingerprints to detect new regressions, frequency spikes, and resolved errors.
+pub fn compute_log_diff(baseline: &[LogEntry], current: &[LogEntry]) -> LogDiffReport {
+    let mut base_radar = SpikeRadar::new();
+    base_radar.rebuild_from_logs(baseline);
+
+    let mut curr_radar = SpikeRadar::new();
+    curr_radar.rebuild_from_logs(current);
+
+    let mut new_patterns = Vec::new();
+    let mut regressed_patterns = Vec::new();
+    let mut resolved_patterns = Vec::new();
+    let mut unchanged_patterns = Vec::new();
+
+    for c_cluster in &curr_radar.clusters {
+        let base_match = base_radar
+            .clusters
+            .iter()
+            .find(|b| b.fingerprint == c_cluster.fingerprint);
+
+        match base_match {
+            None => {
+                new_patterns.push(DiffPatternEntry {
+                    fingerprint: c_cluster.fingerprint.clone(),
+                    severity: c_cluster.severity.clone(),
+                    baseline_count: 0,
+                    current_count: c_cluster.count,
+                    sample_message: c_cluster.sample_entry.message_preview(),
+                });
+            }
+            Some(b_cluster) => {
+                let sev = if severity_weight(&c_cluster.severity)
+                    >= severity_weight(&b_cluster.severity)
+                {
+                    c_cluster.severity.clone()
+                } else {
+                    b_cluster.severity.clone()
+                };
+                let entry = DiffPatternEntry {
+                    fingerprint: c_cluster.fingerprint.clone(),
+                    severity: sev,
+                    baseline_count: b_cluster.count,
+                    current_count: c_cluster.count,
+                    sample_message: c_cluster.sample_entry.message_preview(),
+                };
+                // Flag as regressed if count grew by >= 50% and at least +2 occurrences
+                if c_cluster.count >= b_cluster.count + 2
+                    && c_cluster.count * 2 >= b_cluster.count * 3
+                {
+                    regressed_patterns.push(entry);
+                } else {
+                    unchanged_patterns.push(entry);
+                }
+            }
+        }
+    }
+
+    for b_cluster in &base_radar.clusters {
+        if !curr_radar
+            .clusters
+            .iter()
+            .any(|c| c.fingerprint == b_cluster.fingerprint)
+        {
+            resolved_patterns.push(DiffPatternEntry {
+                fingerprint: b_cluster.fingerprint.clone(),
+                severity: b_cluster.severity.clone(),
+                baseline_count: b_cluster.count,
+                current_count: 0,
+                sample_message: b_cluster.sample_entry.message_preview(),
+            });
+        }
+    }
+
+    LogDiffReport {
+        baseline_total_logs: baseline.len(),
+        current_total_logs: current.len(),
+        baseline_error_logs: base_radar.total_error_logs,
+        current_error_logs: curr_radar.total_error_logs,
+        new_patterns,
+        regressed_patterns,
+        resolved_patterns,
+        unchanged_patterns,
+    }
+}
 
 /// A clustered group of logs sharing the same normalized error fingerprint.
 #[derive(Debug, Clone)]
@@ -234,5 +436,72 @@ mod tests {
             "DB connection pool exhausted on shard <N>"
         );
         assert!(radar.header_summary().contains("2 patterns (5 errs)"));
+    }
+
+    #[test]
+    fn test_compute_log_diff_detects_new_regressed_and_resolved_patterns() {
+        let baseline = vec![
+            LogEntry {
+                severity: Some("WARNING".to_string()),
+                text_payload: Some("Deprecated API v1 called by client 10".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Redis timeout after 100ms".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Redis timeout after 120ms".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut current = Vec::new();
+        for ms in [200, 210, 220, 230, 240, 250] {
+            current.push(LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some(format!("Redis timeout after {}ms", ms)),
+                ..Default::default()
+            });
+        }
+        for req in 1..=3 {
+            current.push(LogEntry {
+                severity: Some("CRITICAL".to_string()),
+                text_payload: Some(format!(
+                    "NullPointerException in CheckoutController req {}",
+                    req
+                )),
+                ..Default::default()
+            });
+        }
+
+        let report = compute_log_diff(&baseline, &current);
+        assert!(report.has_regressions());
+        assert_eq!(report.new_patterns.len(), 1);
+        assert_eq!(
+            report.new_patterns[0].fingerprint,
+            "NullPointerException in CheckoutController req <N>"
+        );
+        assert_eq!(report.new_patterns[0].current_count, 3);
+
+        assert_eq!(report.regressed_patterns.len(), 1);
+        assert_eq!(
+            report.regressed_patterns[0].fingerprint,
+            "Redis timeout after <N>ms"
+        );
+        assert_eq!(report.regressed_patterns[0].baseline_count, 2);
+        assert_eq!(report.regressed_patterns[0].current_count, 6);
+
+        assert_eq!(report.resolved_patterns.len(), 1);
+        assert_eq!(
+            report.resolved_patterns[0].fingerprint,
+            "Deprecated API v1 called by client <N>"
+        );
+
+        let text = report.format_report("v1.2.0 (before)", "v1.3.0 (after)");
+        assert!(text.contains("New Error Patterns"));
+        assert!(text.contains("NullPointerException"));
     }
 }

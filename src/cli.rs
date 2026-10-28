@@ -21,6 +21,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub impersonate_service_account: Option<String>,
 
+    /// Named environment profile from config.toml (e.g. `--profile prod-checkout`)
+    #[arg(long, global = true)]
+    pub profile: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -43,11 +47,14 @@ pub enum Commands {
     /// check log in a single query
     Query(QueryArgs),
 
-    /// Load and view logs from a local file (offline mode)
+    /// Load and view logs from a local file or stdin (`racoon view -`)
     View(ViewArgs),
 
     /// Export logs with advanced options
     Export(ExportArgs),
+
+    /// Compare error fingerprints between two time windows or log files (`racoon diff`)
+    Diff(DiffArgs),
 
     /// Manage configuration
     Config(ConfigArgs),
@@ -242,6 +249,46 @@ pub struct ExportArgs {
     /// Compact output (no pretty printing)
     #[arg(long)]
     pub compact: bool,
+}
+
+/// Arguments for `racoon diff` command (post-deployment / time-window fingerprint comparison).
+#[derive(Parser, Debug)]
+pub struct DiffArgs {
+    /// GCP Project ID (uses config default if not specified)
+    #[arg(short, long)]
+    pub project: Option<String>,
+
+    /// Baseline time window (e.g., `2h..1h` or `2026-10-27T13:00:00Z..2026-10-27T14:00:00Z`)
+    #[arg(long)]
+    pub baseline: Option<String>,
+
+    /// Current time window (e.g., `1h..now` or `30m`)
+    #[arg(long)]
+    pub current: Option<String>,
+
+    /// Baseline local log file (for offline diff without GCP API calls)
+    #[arg(long)]
+    pub baseline_file: Option<String>,
+
+    /// Current local log file (for offline diff without GCP API calls)
+    #[arg(long)]
+    pub current_file: Option<String>,
+
+    /// Optional additional GCP filter applied to both windows
+    #[arg(short, long)]
+    pub filter: Option<String>,
+
+    /// Maximum logs to fetch per window
+    #[arg(long, default_value = "500")]
+    pub limit: usize,
+
+    /// Ask AI to summarize release regression risk from the fingerprint diff
+    #[arg(long)]
+    pub ai: bool,
+
+    /// Output diff report as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Config subcommands
@@ -445,6 +492,35 @@ mod tests {
                 assert_eq!(args.to.as_deref(), Some("2026-10-27 15:00:00"));
             }
             _ => panic!("Expected Export command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_flag_and_diff_subcommand() {
+        let prof_cli =
+            Cli::try_parse_from(["racoon", "--profile", "prod-checkout", "tail"]).unwrap();
+        assert_eq!(prof_cli.profile.as_deref(), Some("prod-checkout"));
+
+        let diff_cli = Cli::try_parse_from([
+            "racoon",
+            "diff",
+            "--project",
+            "prod-proj",
+            "--baseline",
+            "2h..1h",
+            "--current",
+            "1h..now",
+            "--ai",
+        ])
+        .unwrap();
+        match diff_cli.command {
+            Commands::Diff(args) => {
+                assert_eq!(args.project.as_deref(), Some("prod-proj"));
+                assert_eq!(args.baseline.as_deref(), Some("2h..1h"));
+                assert_eq!(args.current.as_deref(), Some("1h..now"));
+                assert!(args.ai);
+            }
+            _ => panic!("Expected Diff command"),
         }
     }
 }

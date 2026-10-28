@@ -10,11 +10,62 @@
 //! - Linux/macOS: `~/.config/racoon/config.toml`
 //! - Windows: `%APPDATA%\racoon\config.toml`
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, warn};
+
+/// Named environment profile (`[profiles.<name>]`) for rapid multi-environment switching (`--profile`).
+#[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
+pub struct ProfileConfig {
+    /// Target GCP project ID(s) or Log View resource names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+
+    /// Optional IAM service account email to impersonate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonate_service_account: Option<String>,
+
+    /// Default GCP filter expression for this profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
+
+    /// Default minimum severity for this profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+
+    /// Default relative time range (`--since`) for this profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// Built-in high-value SRE filter bookmarks available in the TUI (`b` key).
+pub fn default_sre_bookmarks() -> Vec<(String, String)> {
+    vec![
+        (
+            "Errors & Criticals".to_string(),
+            "severity>=ERROR".to_string(),
+        ),
+        (
+            "Warnings & Above".to_string(),
+            "severity>=WARNING".to_string(),
+        ),
+        (
+            "HTTP 5xx Failures".to_string(),
+            "httpRequest.status>=500".to_string(),
+        ),
+        (
+            "Cloud Run Errors".to_string(),
+            "resource.type=\"cloud_run_revision\" severity>=ERROR".to_string(),
+        ),
+        (
+            "GKE Container Errors".to_string(),
+            "resource.type=\"k8s_container\" severity>=ERROR".to_string(),
+        ),
+    ]
+}
 
 /// Configuration errors.
 #[derive(Error, Debug)]
@@ -47,6 +98,14 @@ pub struct Config {
     /// Logging settings.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Named environment profiles (`[profiles.<name>]`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, ProfileConfig>,
+
+    /// Saved GCP filter bookmarks (`[bookmarks]`) accessible via `b` key in TUI.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bookmarks: BTreeMap<String, String>,
 }
 
 /// AI configuration.
@@ -322,6 +381,58 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("racoon")
             .join("history.json")
+    }
+
+    /// Apply a named profile (`--profile <name>`) on top of `self.defaults`, returning the profile.
+    pub fn apply_profile(&mut self, name: &str) -> Result<ProfileConfig, String> {
+        let profile = self
+            .profiles
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("Profile '{}' not found in config.toml", name))?;
+
+        if let Some(ref proj) = profile.project
+            && !proj.trim().is_empty()
+        {
+            self.defaults.project = Some(proj.trim().to_string());
+        }
+        if let Some(ref sa) = profile.impersonate_service_account
+            && !sa.trim().is_empty()
+        {
+            self.defaults.impersonate_service_account = Some(sa.trim().to_string());
+        }
+        if let Some(ref sev) = profile.severity
+            && !sev.trim().is_empty()
+        {
+            self.defaults.severity = Some(sev.trim().to_string());
+        }
+        if let Some(ref since) = profile.since
+            && !since.trim().is_empty()
+        {
+            self.defaults.since = since.trim().to_string();
+        }
+
+        Ok(profile)
+    }
+
+    /// Return the combined list of user-configured `[bookmarks]` and built-in SRE filter bookmarks.
+    pub fn effective_bookmarks(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .bookmarks
+            .iter()
+            .filter(|(k, v)| !k.trim().is_empty() && !v.trim().is_empty())
+            .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+            .collect();
+
+        for (name, filter) in default_sre_bookmarks() {
+            if !out
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case(&name) || v == &filter)
+            {
+                out.push((name, filter));
+            }
+        }
+        out
     }
 
     /// Get API key for a specific provider (environment variable takes precedence over config file).
@@ -627,5 +738,43 @@ limit = 50
 
         // Now config value should be returned
         assert_eq!(config.get_api_key(), Some("config-key".to_string()));
+    }
+
+    #[test]
+    fn test_config_profiles_and_effective_bookmarks() {
+        let toml_str = r#"
+[defaults]
+project = "default-proj"
+since = "1h"
+
+[profiles.prod-checkout]
+project = "prod-apigw,prod-checkout"
+impersonate_service_account = "sre@prod.iam.gserviceaccount.com"
+filter = "severity>=ERROR"
+since = "30m"
+
+[bookmarks]
+"Payment Timeouts" = "resource.type=\"cloud_run_revision\" \"payment timeout\""
+"#;
+        let mut config: Config = toml::from_str(toml_str).unwrap();
+        let profile = config.apply_profile("prod-checkout").unwrap();
+        assert_eq!(profile.filter.as_deref(), Some("severity>=ERROR"));
+        assert_eq!(
+            config.defaults.project.as_deref(),
+            Some("prod-apigw,prod-checkout")
+        );
+        assert_eq!(
+            config.defaults.impersonate_service_account.as_deref(),
+            Some("sre@prod.iam.gserviceaccount.com")
+        );
+        assert_eq!(config.defaults.since, "30m");
+
+        let bookmarks = config.effective_bookmarks();
+        assert!(
+            bookmarks
+                .iter()
+                .any(|(name, f)| { name == "Payment Timeouts" && f.contains("payment timeout") })
+        );
+        assert!(bookmarks.iter().any(|(_, f)| f == "severity>=ERROR"));
     }
 }

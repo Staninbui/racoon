@@ -94,6 +94,12 @@ pub struct App {
     /// Pane currently maximized to full-screen (`z` key), if any.
     pub maximized_pane: Option<ActivePane>,
 
+    /// Saved filter bookmarks (`(name, gcp_filter)`) cycled via `b` key.
+    pub bookmarks: Vec<(String, String)>,
+
+    /// Active index in `bookmarks` when cycling with `b` key.
+    pub bookmark_index: Option<usize>,
+
     /// Saved filter prior to entering Trace, Surrounding, or Radar cluster drill-down mode, restored on exit.
     pub previous_filter: Option<String>,
 
@@ -183,6 +189,8 @@ impl App {
             active_pattern_mute: false,
             focused_pane: ActivePane::Logs,
             maximized_pane: None,
+            bookmarks: crate::config::default_sre_bookmarks(),
+            bookmark_index: None,
             previous_filter: None,
             stream_handle: None,
             ai_available: false,
@@ -223,6 +231,37 @@ impl App {
     pub fn with_filter(mut self, filter: Option<String>) -> Self {
         self.filter = filter.filter(|f| !f.trim().is_empty());
         self
+    }
+
+    /// Configure filter bookmarks (`(name, filter)`) available via the `b` key.
+    pub fn with_bookmarks(mut self, bookmarks: Vec<(String, String)>) -> Self {
+        if !bookmarks.is_empty() {
+            self.bookmarks = bookmarks;
+        }
+        self
+    }
+
+    /// Cycle to the next saved filter bookmark (`b` key), applying its filter immediately.
+    pub fn cycle_next_bookmark(&mut self) -> Option<(String, String)> {
+        if self.bookmarks.is_empty() {
+            return None;
+        }
+        let next_idx = match self.bookmark_index {
+            Some(idx) => (idx + 1) % self.bookmarks.len(),
+            None => 0,
+        };
+        self.bookmark_index = Some(next_idx);
+        let (name, filter) = self.bookmarks[next_idx].clone();
+        self.clear_context_overlay();
+        self.set_filter(Some(filter.clone()));
+        self.set_status(format!(
+            "🔖 Bookmark [{}/{}] {}: {} (Esc to clear)",
+            next_idx + 1,
+            self.bookmarks.len(),
+            name,
+            filter
+        ));
+        Some((name, filter))
     }
 
     /// Attach a live stream handle so its lifecycle is tied to the TUI session.
@@ -1701,5 +1740,41 @@ mod tests {
         let bytes = app.save_incident_report_to_path(&report_path).unwrap();
         assert!(bytes > 100);
         assert!(report_path.exists());
+    }
+
+    #[test]
+    fn test_app_cycle_bookmarks() {
+        let mut app = App::new("prod-proj".to_string())
+            .with_bookmarks(vec![
+                ("Only Errors".to_string(), "severity>=ERROR".to_string()),
+                ("Only Warnings".to_string(), "severity>=WARNING".to_string()),
+            ])
+            .with_offline_logs(vec![
+                LogEntry {
+                    severity: Some("INFO".to_string()),
+                    text_payload: Some("Info log".to_string()),
+                    ..Default::default()
+                },
+                LogEntry {
+                    severity: Some("WARNING".to_string()),
+                    text_payload: Some("Warn log".to_string()),
+                    ..Default::default()
+                },
+                LogEntry {
+                    severity: Some("ERROR".to_string()),
+                    text_payload: Some("Err log".to_string()),
+                    ..Default::default()
+                },
+            ]);
+
+        let (name1, filter1) = app.cycle_next_bookmark().unwrap();
+        assert_eq!(name1, "Only Errors");
+        assert_eq!(filter1, "severity>=ERROR");
+        assert_eq!(app.logs.len(), 1);
+
+        let (name2, filter2) = app.cycle_next_bookmark().unwrap();
+        assert_eq!(name2, "Only Warnings");
+        assert_eq!(filter2, "severity>=WARNING");
+        assert_eq!(app.logs.len(), 2);
     }
 }

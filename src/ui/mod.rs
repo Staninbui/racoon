@@ -11,7 +11,10 @@ pub mod theme;
 pub mod widgets;
 
 pub use app::{ActivePane, App, InputMode};
-pub use radar::{ErrorCluster, SpikeRadar, fingerprint_message};
+pub use radar::{
+    DiffPatternEntry, ErrorCluster, LogDiffReport, SpikeRadar, compute_log_diff,
+    fingerprint_message,
+};
 pub use selector::{ModelSelectorState, run_model_selector, select_with_terminal};
 
 use std::io;
@@ -41,10 +44,12 @@ pub enum AiRequest {
         filter_clause: Option<String>,
         local_logs: Vec<LogEntry>,
     },
-    /// Ask a question and get an analyzed answer (includes current buffered logs for offline fallback).
+    /// Ask a question and get an analyzed answer (retains active AI diagnosis & log context for multi-turn follow-up).
     AskQuestion {
         question: String,
         local_logs: Vec<LogEntry>,
+        previous_analysis: Option<String>,
+        selected_log: Option<Box<LogEntry>>,
     },
     /// Dynamically switch the active AI client after selecting a new provider/model in TUI.
     UpdateClient(Option<GeminiClient>),
@@ -175,6 +180,8 @@ pub async fn run_app(
                 AiRequest::AskQuestion {
                     question: input,
                     local_logs,
+                    previous_analysis,
+                    selected_log,
                 } => {
                     let result = if let Some(ref client) = current_client {
                         match client.detect_intent(&input).await {
@@ -195,7 +202,20 @@ pub async fn run_app(
                                 question,
                                 gcp_query,
                             }) => {
-                                if let Some(ref lc) = worker_logs_client {
+                                if let Some(ref prev) = previous_analysis {
+                                    match client
+                                        .ask_followup(
+                                            &question,
+                                            prev,
+                                            selected_log.as_deref(),
+                                            &local_logs,
+                                        )
+                                        .await
+                                    {
+                                        Ok(answer) => AiResponse::Explanation(answer),
+                                        Err(e) => AiResponse::Error(e.to_string()),
+                                    }
+                                } else if let Some(ref lc) = worker_logs_client {
                                     match client
                                         .ask_question_with_query(
                                             &question,
@@ -212,7 +232,15 @@ pub async fn run_app(
                                         Err(e) => AiResponse::Error(e.to_string()),
                                     }
                                 } else {
-                                    match client.analyze_logs(&local_logs).await {
+                                    match client
+                                        .ask_followup(
+                                            &question,
+                                            "Offline log inspection session.",
+                                            selected_log.as_deref(),
+                                            &local_logs,
+                                        )
+                                        .await
+                                    {
                                         Ok(answer) => AiResponse::QuestionAnswer {
                                             query: "(offline buffer)".to_string(),
                                             log_count: local_logs.len(),
@@ -442,12 +470,16 @@ async fn run_event_loop(
                 }
                 input::Action::AskQuestion(question) => {
                     if let Some(tx) = ai_tx {
+                        let previous_analysis = app.ai_response.clone();
+                        let selected_log = app.selected_log().cloned().map(Box::new);
                         app.start_ai_loading();
                         app.ai_query = Some(question.clone());
                         let _ = tx
                             .send(AiRequest::AskQuestion {
                                 question,
                                 local_logs: app.logs.iter().cloned().collect(),
+                                previous_analysis,
+                                selected_log,
                             })
                             .await;
                     }

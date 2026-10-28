@@ -170,6 +170,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Cycle saved filter bookmarks (`b` key)
+        KeyCode::Char('b') => match app.cycle_next_bookmark() {
+            Some((_, new_filter)) => Action::ApplyFilter(Some(new_filter)),
+            None => {
+                app.set_error("No filter bookmarks configured.".to_string());
+                Action::None
+            }
+        },
+
         // Resize Surrounding Context window (`[` to shrink, `]` / `+` / `=` to expand)
         KeyCode::Char(']') | KeyCode::Char('+') | KeyCode::Char('=')
             if app.active_surrounding.is_some() =>
@@ -716,5 +725,9 @@ mod tests {
         // 'w' triggers SaveIncidentReport action
         let w_action = handle_key_event(&mut app, make_key(KeyCode::Char('w')));
         assert!(matches!(w_action, Action::SaveIncidentReport));
+
+        // 'b' cycles through filter bookmarks and triggers ApplyFilter
+        let b_action = handle_key_event(&mut app, make_key(KeyCode::Char('b')));
+        assert!(matches!(b_action, Action::ApplyFilter(Some(_))));
     }
 }

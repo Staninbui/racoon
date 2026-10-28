@@ -84,3 +84,20 @@
 [logging]
 # Log level for racoon itself (debug, info, warn, error)
 # level = "info"
+
+# ------------------------------------------------------------------------------
+# Named Environment Profiles (use via `racoon --profile <name> tail`)
+# ------------------------------------------------------------------------------
+# [profiles.prod-checkout]
+# project = "prod-apigw,prod-checkout,prod-payment"
+# impersonate_service_account = "sre-prod-reader@prod-checkout.iam.gserviceaccount.com"
+# filter = "severity>=WARNING"
+# since = "1h"
+
+# ------------------------------------------------------------------------------
+# Saved Filter Bookmarks (cycle in TUI with `b` key)
+# ------------------------------------------------------------------------------
+# [bookmarks]
+# "Payment 5xx & Timeouts" = "resource.type=\"cloud_run_revision\" (httpRequest.status>=500 OR \"timeout\")"
+# "Exclude Health Probes" = "-httpRequest.requestUrl:\"/healthz\""
+
