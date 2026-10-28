@@ -18,6 +18,7 @@ A powerful terminal UI for streaming, querying, and analyzing Google Cloud Platf
 - 🔗 **Distributed Trace Context (`x` / `E` keys)** - Isolate full request traces across microservices and run 1-keystroke Full-Trace / Context AI Root Cause Analysis (RCA)
 - 🔍 **Powerful Querying** - Use GCP filter syntax or natural language
 - 🤖 **Multi-Provider AI Analysis (`m` key)** - Switch seamlessly between Google Gemini (`gemini-3.8-flash`, `gemini-4-argon`), OpenAI, Anthropic, and Agnes AI
+- 🛡️ **Pre-AI PII & Secret Guard** - Automatically scrubs Bearer tokens, JWTs, API keys, URI passwords, Luhn credit cards, and customer emails locally before sending logs to any LLM
 - 📁 **Offline Mode** - Export logs (paginated JSON or streaming NDJSON) and analyze them later without internet
 - 🎨 **Themeable** - Dark and light themes for comfortable viewing
 - ⌨️ **Vim-style Navigation** - Efficient keyboard-driven interface

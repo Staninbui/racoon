@@ -64,6 +64,10 @@ pub struct AiConfig {
     #[serde(default = "default_model")]
     pub model: String,
 
+    /// Whether to scrub PII and secrets locally before sending logs to AI (default: true).
+    #[serde(default = "default_redact_pii")]
+    pub redact_pii: bool,
+
     /// Per-provider credentials and optional custom base URLs.
     #[serde(default)]
     pub providers: ProvidersConfig,
@@ -109,12 +113,17 @@ fn default_model() -> String {
     "gemini-3.8-flash".to_string()
 }
 
+fn default_redact_pii() -> bool {
+    true
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             provider: default_provider(),
             api_key: None,
             model: default_model(),
+            redact_pii: default_redact_pii(),
             providers: ProvidersConfig::default(),
         }
     }
@@ -473,6 +482,7 @@ limit = 50
                 provider: "google".to_string(),
                 api_key: Some("config-key".to_string()),
                 model: default_model(),
+                redact_pii: true,
                 providers: ProvidersConfig::default(),
             },
             ..Default::default()

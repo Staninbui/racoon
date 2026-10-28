@@ -18,6 +18,9 @@
 # Active model to use for AI features
 # model = "gemini-3.8-flash"
 
+# Automatically scrub PII (emails, cards, SSNs) & secrets (JWTs, API keys, passwords) locally before sending to AI
+# redact_pii = true
+
 # Per-provider API keys & optional custom base URLs
 # Environment variables also work: GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, AGNES_API_KEY
 [ai.providers.google]

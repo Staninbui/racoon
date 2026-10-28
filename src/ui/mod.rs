@@ -78,6 +78,7 @@ pub async fn run_app(
     if let Some(ref c) = gemini {
         app.ai_available = true;
         app.ai_model_label = format!("{}/{}", c.provider().id(), c.model());
+        app.ai_pii_guard = c.redact_pii();
     }
 
     let ai_tx_clone = ai_tx.clone();

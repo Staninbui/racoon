@@ -10,6 +10,7 @@ use tracing::debug;
 
 use super::models::ProviderKind;
 use super::prompts;
+use super::redact::{RedactionStats, redact_sensitive_text};
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::utils::sanitize_query;
 
@@ -89,6 +90,8 @@ pub struct GeminiClient {
     model: String,
     /// Base URL for the provider API
     base_url: String,
+    /// Whether to scrub PII and secrets locally before sending prompts to the LLM
+    redact_pii: bool,
 }
 
 /// Alias for `GeminiClient` representing the multi-provider AI client.
@@ -121,7 +124,19 @@ impl GeminiClient {
             api_key,
             model,
             base_url: resolved_base_url,
+            redact_pii: true,
         }
+    }
+
+    /// Configure whether Pre-AI PII & Secret redaction is enabled.
+    pub fn with_redact_pii(mut self, redact_pii: bool) -> Self {
+        self.redact_pii = redact_pii;
+        self
+    }
+
+    /// Return whether Pre-AI PII & Secret redaction is enabled.
+    pub fn redact_pii(&self) -> bool {
+        self.redact_pii
     }
 
     /// Return the active provider.
@@ -141,7 +156,7 @@ impl GeminiClient {
             return Ok(client);
         }
         let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| AiError::NoApiKey)?;
-        Ok(Self::new(api_key))
+        Ok(Self::new(api_key).with_redact_pii(config.ai.redact_pii))
     }
 
     /// Create client from config (checks provider-specific env var first, then config file).
@@ -155,9 +170,10 @@ impl GeminiClient {
         })?;
         let model = config.ai.model.clone();
         let base_url = config.get_provider_base_url(provider.id());
-        Ok(Self::with_provider_and_model(
-            provider, api_key, model, base_url,
-        ))
+        Ok(
+            Self::with_provider_and_model(provider, api_key, model, base_url)
+                .with_redact_pii(config.ai.redact_pii),
+        )
     }
 
     /// Check if an API key is available for the active or default provider.
@@ -166,21 +182,33 @@ impl GeminiClient {
         config.get_api_key().is_some() || get_api_key().is_some()
     }
 
-    /// Explain a log entry using AI.
+    /// Explain a log entry using AI (applying Pre-AI PII/Secret redaction when enabled).
     pub async fn explain_log(&self, entry: &LogEntry) -> Result<String, AiError> {
-        let log_json =
+        let raw_json =
             serde_json::to_string_pretty(entry).map_err(|e| AiError::ParseError(e.to_string()))?;
 
-        let prompt = prompts::explain_log_prompt(&log_json);
+        let (payload_json, stats) = if self.redact_pii {
+            redact_sensitive_text(&raw_json)
+        } else {
+            (raw_json, RedactionStats::default())
+        };
+
+        let prompt = prompts::explain_log_prompt(&payload_json);
 
         debug!(
             provider = self.provider.id(),
             model = %self.model,
+            redactions = stats.total_redactions,
             "Explaining log entry: {}",
             entry.insert_id.as_deref().unwrap_or("unknown")
         );
 
-        self.generate(&prompt).await
+        let explanation = self.generate(&prompt).await?;
+        if let Some(banner) = stats.banner() {
+            Ok(format!("{}\n\n{}", banner, explanation))
+        } else {
+            Ok(explanation)
+        }
     }
 
     /// Detect user intent from natural language input.
@@ -252,24 +280,40 @@ Response:"#,
         Ok(query)
     }
 
-    /// Analyze multiple related logs for root cause.
+    /// Analyze multiple related logs for root cause (applying Pre-AI PII/Secret redaction when enabled).
     pub async fn analyze_logs(&self, entries: &[LogEntry]) -> Result<String, AiError> {
         if entries.is_empty() {
             return Ok("No logs to analyze.".to_string());
         }
 
-        // Serialize logs (limit to avoid token limits)
-        let logs_json: Vec<String> = entries
-            .iter()
-            .take(10)
-            .filter_map(|e| serde_json::to_string(e).ok())
-            .collect();
+        let mut total_stats = RedactionStats::default();
+        let mut logs_json: Vec<String> = Vec::new();
+        for entry in entries.iter().take(15) {
+            if let Ok(raw) = serde_json::to_string(entry) {
+                if self.redact_pii {
+                    let (scrubbed, st) = redact_sensitive_text(&raw);
+                    total_stats.merge(&st);
+                    logs_json.push(scrubbed);
+                } else {
+                    logs_json.push(raw);
+                }
+            }
+        }
 
         let prompt = prompts::analyze_logs_prompt(&logs_json.join("\n---\n"));
 
-        debug!("Analyzing {} log entries", entries.len().min(10));
+        debug!(
+            count = logs_json.len(),
+            redactions = total_stats.total_redactions,
+            "Analyzing log entries"
+        );
 
-        self.generate(&prompt).await
+        let analysis = self.generate(&prompt).await?;
+        if let Some(banner) = total_stats.banner() {
+            Ok(format!("{}\n\n{}", banner, analysis))
+        } else {
+            Ok(analysis)
+        }
     }
 
     /// Ask a question about the logs and get a human-readable answer.
@@ -320,7 +364,7 @@ Response:"#,
         question: &str,
         entries: &[LogEntry],
     ) -> Result<String, AiError> {
-        let logs_summary = if entries.is_empty() {
+        let raw_summary = if entries.is_empty() {
             "No matching logs found.".to_string()
         } else {
             entries
@@ -336,6 +380,12 @@ Response:"#,
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
+        };
+
+        let (logs_summary, stats) = if self.redact_pii {
+            redact_sensitive_text(&raw_summary)
+        } else {
+            (raw_summary, RedactionStats::default())
         };
 
         let prompt = format!(
@@ -371,7 +421,12 @@ Your answer:"#,
             logs = logs_summary
         );
 
-        self.generate(&prompt).await
+        let answer = self.generate(&prompt).await?;
+        if let Some(banner) = stats.banner() {
+            Ok(format!("{}\n\n{}", banner, answer))
+        } else {
+            Ok(answer)
+        }
     }
 
     /// Quick check for errors in a time range.

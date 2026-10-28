@@ -783,6 +783,7 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             println!("{}", "[ai]".cyan());
             println!("  provider: {}", config.ai.provider.green().bold());
             println!("  model: {}", config.ai.model.cyan().bold());
+            println!("  redact_pii: {}", config.ai.redact_pii);
             for &kind in ProviderKind::all() {
                 let key_preview = config
                     .get_provider_api_key(kind.id())

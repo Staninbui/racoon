@@ -75,6 +75,9 @@ pub struct App {
     /// Currently configured AI provider and model label (e.g., "google/gemini-3.8-flash").
     pub ai_model_label: String,
 
+    /// Whether Pre-AI PII & Secret Guard is enabled.
+    pub ai_pii_guard: bool,
+
     /// GCP project ID or offline file label.
     pub project: String,
 
@@ -130,6 +133,7 @@ impl App {
             ai_loading: false,
             ai_query: None,
             ai_model_label: "google/gemini-3.8-flash".to_string(),
+            ai_pii_guard: true,
             project,
             is_streaming: true,
             should_quit: false,

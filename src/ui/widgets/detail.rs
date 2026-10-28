@@ -112,11 +112,17 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         (help, colors.dim_style())
     };
 
+    let ai_title = if app.ai_pii_guard {
+        " AI Analysis 🛡️ PII Guard (Ctrl+n/p to scroll) "
+    } else {
+        " AI Analysis (Ctrl+n/p to scroll) "
+    };
+
     let paragraph = Paragraph::new(content)
         .style(style)
         .block(
             Block::default()
-                .title(" AI Analysis (Ctrl+n/p to scroll) ")
+                .title(ai_title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(colors.ai_border)),
         )
