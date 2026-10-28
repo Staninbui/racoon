@@ -118,9 +118,23 @@ gcloud auth application-default login
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 ```
 
-### 2. Set up AI (Optional)
+### 2. Set up AI (Zero-Key Vertex AI ADC or External API Key)
 
-For AI features, set your Gemini API key:
+**Option A: Enterprise Zero-API-Key Mode (Google Cloud Vertex AI via ADC / IAM)**
+
+No external API key needed! Racoon reuses your GCP Application Default Credentials (and respects `--impersonate-service-account`) to call Vertex AI within your GCP project boundary:
+
+```toml
+# ~/.config/racoon/config.toml
+[ai]
+provider = "vertex"
+model = "gemini-3.8-flash"
+
+[ai.providers.vertex]
+location = "us-central1" # or "global"
+```
+
+**Option B: External Provider API Key (Google AI Studio, OpenAI, Anthropic, Agnes AI)**
 
 ```bash
 export GEMINI_API_KEY=your-api-key-here
@@ -139,13 +153,16 @@ api_key = "your-api-key-here"
 # Stream logs in real-time
 racoon tail --project your-project-id
 
+# Least-privilege production access via IAM Service Account Impersonation
+racoon --impersonate-service-account sre-reader@prod-proj.iam.gserviceaccount.com tail --project prod-proj
+
 # Query logs
 racoon query --project your-project-id --filter 'severity>=ERROR'
 
 # List projects
 racoon projects
 
-# Check authentication
+# Check authentication (supports --impersonate-service-account)
 racoon auth
 ```
 

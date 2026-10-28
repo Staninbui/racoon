@@ -128,6 +128,11 @@ impl LogsClient {
         &self.project
     }
 
+    /// Get the underlying `GcpAuth` handle (including any active IAM Service Account Impersonation).
+    pub fn auth(&self) -> &GcpAuth {
+        &self.auth
+    }
+
     /// Get the resolved `resourceNames` sent to Cloud Logging `entries:list`.
     pub fn resource_names(&self) -> &[String] {
         &self.resource_names

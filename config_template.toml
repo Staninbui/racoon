@@ -8,10 +8,11 @@
 # All values shown are defaults. Uncomment and modify as needed.
 
 # ------------------------------------------------------------------------------
-# AI Settings (Multi-Provider: Google, OpenAI, Anthropic, Agnes AI)
+# AI Settings (Multi-Provider: Google, Vertex AI (ADC), OpenAI, Anthropic, Agnes AI)
 # ------------------------------------------------------------------------------
 [ai]
-# Active AI provider ("google", "openai", "anthropic", "agnes")
+# Active AI provider ("google", "vertex", "openai", "anthropic", "agnes")
+# Tip: Use "vertex" for zero-API-key enterprise compliance via GCP ADC / IAM Impersonation!
 # Tip: Run `racoon models` to switch providers and models interactively!
 # provider = "google"
 
@@ -25,6 +26,12 @@
 # Environment variables also work: GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, AGNES_API_KEY
 [ai.providers.google]
 # api_key = "your-gemini-api-key"
+
+[ai.providers.vertex]
+# Zero-API-key mode: authenticates automatically via GCP ADC (`gcloud auth application-default login`)
+# or `--impersonate-service-account`.
+# project = "your-gcp-project-id" # defaults to --project or [defaults].project
+# location = "us-central1"        # e.g. "us-central1", "europe-west4", or "global"
 
 [ai.providers.openai]
 # api_key = "your-openai-api-key"
@@ -44,6 +51,10 @@
 [defaults]
 # Default GCP project (can be overridden with --project)
 # project = "my-project-123"
+
+# Optional GCP service account email to impersonate for least-privilege log access & Vertex AI
+# (can also be passed via `--impersonate-service-account` or `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`)
+# impersonate_service_account = "sre-prod-reader@my-project-123.iam.gserviceaccount.com"
 
 # Default time range for log queries
 # since = "1h"

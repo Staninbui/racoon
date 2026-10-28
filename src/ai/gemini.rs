@@ -15,7 +15,7 @@ use super::compact::{compact_log_for_ai, compact_logs_for_rca, try_local_intent}
 use super::models::ProviderKind;
 use super::prompts;
 use super::redact::{RedactionStats, redact_sensitive_text};
-use crate::gcp::{LogEntry, LogFilter, LogsClient};
+use crate::gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
 use crate::ui::fingerprint_message;
 use crate::utils::sanitize_query;
 
@@ -111,7 +111,7 @@ pub enum UserIntent {
     GenerateQuery { query: String },
 }
 
-/// Unified AI client supporting Google Gemini, OpenAI GPT, Anthropic Claude, and Agnes AI.
+/// Unified AI client supporting Google Gemini, Vertex AI (ADC), OpenAI GPT, Anthropic Claude, and Agnes AI.
 ///
 /// Named `GeminiClient` (with alias `AiClient`) for backward compatibility across the crate.
 #[derive(Clone)]
@@ -120,7 +120,7 @@ pub struct GeminiClient {
     http: Client,
     /// Active AI provider
     provider: ProviderKind,
-    /// Provider API key
+    /// Provider API key (or optional static Bearer token for Vertex AI)
     api_key: String,
     /// Model name to use
     model: String,
@@ -128,12 +128,38 @@ pub struct GeminiClient {
     base_url: String,
     /// Whether to scrub PII and secrets locally before sending prompts to the LLM
     redact_pii: bool,
+    /// Optional GCP authentication manager (used by `ProviderKind::VertexAi` for zero-key ADC / impersonation)
+    gcp_auth: Option<GcpAuth>,
+    /// Target GCP project ID for Vertex AI requests
+    vertex_project: Option<String>,
+    /// Target GCP region for Vertex AI requests (e.g. `us-central1` or `global`)
+    vertex_location: String,
     /// Client-side LRU cache for instant 0-token repeat explanations & RCAs
     cache: Arc<Mutex<AiResponseCache>>,
 }
 
 /// Alias for `GeminiClient` representing the multi-provider AI client.
 pub type AiClient = GeminiClient;
+
+/// Extract a clean single GCP project ID from a `--project` value that may be comma-separated
+/// (`prod-apigw,prod-order`) or a full resource name (`projects/my-proj/locations/...`).
+pub fn extract_first_gcp_project_id(raw: &str) -> Option<String> {
+    let first = raw.split(',').next()?.trim();
+    if first.is_empty() || first.starts_with("file:") {
+        return None;
+    }
+    if let Some(rest) = first.strip_prefix("projects/") {
+        let proj = rest.split('/').next()?.trim();
+        if !proj.is_empty() {
+            return Some(proj.to_string());
+        }
+        return None;
+    }
+    if first.contains('/') {
+        return None;
+    }
+    Some(first.to_string())
+}
 
 impl GeminiClient {
     /// Create a new client using the default Google Gemini provider and model.
@@ -163,6 +189,9 @@ impl GeminiClient {
             model,
             base_url: resolved_base_url,
             redact_pii: true,
+            gcp_auth: None,
+            vertex_project: None,
+            vertex_location: "us-central1".to_string(),
             cache: Arc::new(Mutex::new(AiResponseCache::default())),
         }
     }
@@ -171,6 +200,59 @@ impl GeminiClient {
     pub fn with_redact_pii(mut self, redact_pii: bool) -> Self {
         self.redact_pii = redact_pii;
         self
+    }
+
+    /// Attach a `GcpAuth` instance for zero-API-key Vertex AI authentication (supports IAM impersonation).
+    pub fn with_gcp_auth(mut self, gcp_auth: Option<GcpAuth>) -> Self {
+        self.gcp_auth = gcp_auth;
+        self
+    }
+
+    /// Configure the target GCP project and location for Vertex AI requests.
+    pub fn with_vertex_target(mut self, project: Option<String>, location: String) -> Self {
+        self.vertex_project = project.and_then(|p| extract_first_gcp_project_id(&p));
+        if !location.trim().is_empty() {
+            self.vertex_location = location.trim().to_string();
+        }
+        self
+    }
+
+    /// Return the configured Vertex AI project ID, if any.
+    pub fn vertex_project(&self) -> Option<&str> {
+        self.vertex_project.as_deref()
+    }
+
+    /// Return the configured Vertex AI region/location.
+    pub fn vertex_location(&self) -> &str {
+        &self.vertex_location
+    }
+
+    /// Build the Vertex AI `generateContent` endpoint URL for the configured project, location, and model.
+    pub fn vertex_endpoint_url(&self) -> Result<String, AiError> {
+        let project = self
+            .vertex_project
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or_else(|| {
+                AiError::ApiError(
+                    "Vertex AI requires a GCP project ID. Pass --project <ID>, set [defaults].project, or set VERTEX_PROJECT / GOOGLE_CLOUD_PROJECT."
+                        .to_string(),
+                )
+            })?;
+        let location = self.vertex_location.trim();
+        let default_base = ProviderKind::VertexAi.default_base_url();
+        let host_base = if self.base_url != default_base && !self.base_url.trim().is_empty() {
+            self.base_url.trim_end_matches('/').to_string()
+        } else if location.eq_ignore_ascii_case("global") {
+            "https://aiplatform.googleapis.com/v1".to_string()
+        } else {
+            format!("https://{}-aiplatform.googleapis.com/v1", location)
+        };
+
+        Ok(format!(
+            "{}/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
+            host_base, project, location, self.model
+        ))
     }
 
     /// Return whether Pre-AI PII & Secret redaction is enabled.
@@ -212,24 +294,53 @@ impl GeminiClient {
 
     /// Create client from config (checks provider-specific env var first, then config file).
     pub fn from_config(config: &crate::config::Config) -> Result<Self, AiError> {
+        Self::from_config_with_gcp(config, None, None)
+    }
+
+    /// Create client from config with optional shared `GcpAuth` and CLI `--project` context.
+    ///
+    /// When `provider == ProviderKind::VertexAi`, no external API key is required; the client
+    /// authenticates via GCP Application Default Credentials (or `--impersonate-service-account`).
+    pub fn from_config_with_gcp(
+        config: &crate::config::Config,
+        gcp_auth: Option<GcpAuth>,
+        cli_project: Option<&str>,
+    ) -> Result<Self, AiError> {
         let provider = ProviderKind::parse(&config.ai.provider);
+        let model = config.ai.model.clone();
+        let base_url = config.get_provider_base_url(provider.id());
+
+        if provider == ProviderKind::VertexAi {
+            let api_key = config.get_provider_api_key("vertex").unwrap_or_default();
+            let vertex_project = config.get_vertex_project(cli_project);
+            let vertex_location = config.get_vertex_location();
+            return Ok(
+                Self::with_provider_and_model(provider, api_key, model, base_url)
+                    .with_redact_pii(config.ai.redact_pii)
+                    .with_gcp_auth(gcp_auth)
+                    .with_vertex_target(vertex_project, vertex_location),
+            );
+        }
+
         let api_key = config.get_provider_api_key(provider.id()).ok_or_else(|| {
             AiError::NoApiKeyForProvider {
                 provider: provider.display_name().to_string(),
                 env_var: provider.env_var().to_string(),
             }
         })?;
-        let model = config.ai.model.clone();
-        let base_url = config.get_provider_base_url(provider.id());
         Ok(
             Self::with_provider_and_model(provider, api_key, model, base_url)
-                .with_redact_pii(config.ai.redact_pii),
+                .with_redact_pii(config.ai.redact_pii)
+                .with_gcp_auth(gcp_auth),
         )
     }
 
-    /// Check if an API key is available for the active or default provider.
+    /// Check if an API key (or Vertex AI ADC provider) is available for the active or default provider.
     pub fn is_available() -> bool {
         let config = crate::config::Config::load();
+        if ProviderKind::parse(&config.ai.provider) == ProviderKind::VertexAi {
+            return true;
+        }
         config.get_api_key().is_some() || get_api_key().is_some()
     }
 
@@ -521,11 +632,87 @@ Return JSON only:
     ) -> Result<String, AiError> {
         match self.provider {
             ProviderKind::Google => self.generate_google(prompt, max_tokens).await,
+            ProviderKind::VertexAi => self.generate_vertex(prompt, max_tokens).await,
             ProviderKind::OpenAi | ProviderKind::Agnes => {
                 self.generate_openai_compatible(prompt, max_tokens).await
             }
             ProviderKind::Anthropic => self.generate_anthropic(prompt, max_tokens).await,
         }
+    }
+
+    /// Generate content via Google Cloud Vertex AI (`publishers/google/models/{model}:generateContent`)
+    /// using GCP Application Default Credentials (or IAM Service Account Impersonation).
+    async fn generate_vertex(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
+        let url = self.vertex_endpoint_url()?;
+
+        let bearer_token = if !self.api_key.trim().is_empty() {
+            self.api_key.trim().to_string()
+        } else if let Some(ref auth) = self.gcp_auth {
+            auth.cloud_platform_token().await.map_err(|e| {
+                AiError::ApiError(format!("Vertex AI GCP authentication failed: {}", e))
+            })?
+        } else {
+            let config = crate::config::Config::load();
+            let impersonate = config.resolve_impersonate_service_account(None);
+            let auth = GcpAuth::with_impersonation(impersonate)
+                .await
+                .map_err(|e| {
+                    AiError::ApiError(format!("Vertex AI GCP authentication init failed: {}", e))
+                })?;
+            auth.cloud_platform_token().await.map_err(|e| {
+                AiError::ApiError(format!("Vertex AI GCP token acquisition failed: {}", e))
+            })?
+        };
+
+        let request_body = GeminiRequest {
+            contents: vec![Content {
+                role: Some("user".to_string()),
+                parts: vec![Part {
+                    text: prompt.to_string(),
+                }],
+            }],
+            generation_config: Some(GenerationConfig {
+                temperature: Some(0.3),
+                max_output_tokens: Some(max_tokens),
+                top_p: Some(0.8),
+                top_k: Some(40),
+            }),
+        };
+
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&bearer_token)
+            .json(&request_body)
+            .send()
+            .await?;
+        let status = response.status();
+
+        if status == 429 {
+            return Err(AiError::RateLimited);
+        }
+
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(AiError::ApiError(format!(
+                "Vertex AI HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let response_body: GeminiResponse = response
+            .json()
+            .await
+            .map_err(|e| AiError::ParseError(e.to_string()))?;
+
+        let text = response_body
+            .candidates
+            .first()
+            .and_then(|c| c.content.parts.first())
+            .map(|p| p.text.clone())
+            .ok_or_else(|| AiError::ParseError("No content in Vertex AI response".to_string()))?;
+
+        Ok(text)
     }
 
     /// Generate content via Google Gemini REST API (`generateContent`).
@@ -539,6 +726,7 @@ Return JSON only:
 
         let request_body = GeminiRequest {
             contents: vec![Content {
+                role: Some("user".to_string()),
                 parts: vec![Part {
                     text: prompt.to_string(),
                 }],
@@ -743,6 +931,8 @@ struct GeminiRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Content {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
     parts: Vec<Part>,
 }
 
@@ -918,5 +1108,38 @@ mod tests {
             intent,
             UserIntent::SetFilter { ref filter, .. } if filter == "severity>=ERROR"
         ));
+    }
+
+    #[test]
+    fn test_vertex_ai_zero_key_client_and_endpoint_urls() {
+        let mut config = crate::config::Config::default();
+        config.set_active_model("vertex", "gemini-3.8-flash");
+        config.ai.providers.vertex.location = Some("us-central1".to_string());
+
+        // Vertex AI does NOT require any external API key when initialized from config
+        let client =
+            GeminiClient::from_config_with_gcp(&config, None, Some("prod-apigw,prod-order"))
+                .expect("Vertex AI client should initialize without an external API key");
+        assert_eq!(client.provider(), ProviderKind::VertexAi);
+        assert_eq!(client.vertex_project(), Some("prod-apigw"));
+        assert_eq!(client.vertex_location(), "us-central1");
+        assert_eq!(
+            client.vertex_endpoint_url().unwrap(),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/prod-apigw/locations/us-central1/publishers/google/models/gemini-3.8-flash:generateContent"
+        );
+
+        // Global location uses `aiplatform.googleapis.com` and extracts project from Log View path
+        let global_client = client.with_vertex_target(
+            Some(
+                "projects/sec-audit-prod/locations/global/buckets/_Default/views/_AllLogs"
+                    .to_string(),
+            ),
+            "global".to_string(),
+        );
+        assert_eq!(global_client.vertex_project(), Some("sec-audit-prod"));
+        assert_eq!(
+            global_client.vertex_endpoint_url().unwrap(),
+            "https://aiplatform.googleapis.com/v1/projects/sec-audit-prod/locations/global/publishers/google/models/gemini-3.8-flash:generateContent"
+        );
     }
 }

@@ -80,6 +80,10 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub google: ProviderEndpointConfig,
 
+    /// Google Cloud Vertex AI configuration (uses GCP ADC / Impersonation by default).
+    #[serde(default)]
+    pub vertex: VertexProviderConfig,
+
     /// OpenAI GPT configuration (`OPENAI_API_KEY`).
     #[serde(default)]
     pub openai: ProviderEndpointConfig,
@@ -91,6 +95,26 @@ pub struct ProvidersConfig {
     /// Agnes AI configuration (`AGNES_API_KEY`).
     #[serde(default)]
     pub agnes: ProviderEndpointConfig,
+}
+
+/// Vertex AI endpoint configuration (`[ai.providers.vertex]`).
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct VertexProviderConfig {
+    /// Optional GCP project ID for Vertex AI (defaults to `VERTEX_PROJECT`, `GOOGLE_CLOUD_PROJECT`, or `[defaults].project`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+
+    /// Optional GCP region for Vertex AI (defaults to `VERTEX_LOCATION` or `"us-central1"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+
+    /// Optional static OAuth2 access token override (normally omitted so ADC / Impersonation is used automatically).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+
+    /// Optional custom Vertex AI base URL override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Endpoint and credential settings for an individual AI provider.
@@ -136,6 +160,10 @@ pub struct DefaultsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
 
+    /// Optional target service account email for IAM Service Account Impersonation (`--impersonate-service-account`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub impersonate_service_account: Option<String>,
+
     /// Default time range for queries (e.g., "1h", "30m", "24h").
     #[serde(default = "default_since")]
     pub since: String,
@@ -153,6 +181,7 @@ impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
             project: None,
+            impersonate_service_account: None,
             since: default_since(),
             limit: default_limit(),
             severity: None,
@@ -357,6 +386,20 @@ impl Config {
                         None
                     }
                 }),
+            "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" => {
+                std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN")
+                    .ok()
+                    .or_else(|| std::env::var("VERTEX_API_KEY").ok())
+                    .filter(|k| !k.is_empty())
+                    .or_else(|| {
+                        self.ai
+                            .providers
+                            .vertex
+                            .api_key
+                            .clone()
+                            .filter(|k| !k.is_empty())
+                    })
+            }
             _ => self.ai.api_key.clone().filter(|k| !k.is_empty()),
         }
     }
@@ -365,12 +408,107 @@ impl Config {
     pub fn get_provider_base_url(&self, provider: &str) -> Option<String> {
         match provider.trim().to_lowercase().as_str() {
             "google" | "gemini" => self.ai.providers.google.base_url.clone(),
+            "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" => {
+                self.ai.providers.vertex.base_url.clone()
+            }
             "openai" | "gpt" => self.ai.providers.openai.base_url.clone(),
             "anthropic" | "claude" => self.ai.providers.anthropic.base_url.clone(),
             "agnes" | "agnes-ai" => self.ai.providers.agnes.base_url.clone(),
             _ => None,
         }
         .filter(|u| !u.trim().is_empty())
+    }
+
+    /// Resolve the target service account email for IAM Service Account Impersonation
+    /// (CLI `--impersonate-service-account` > `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT` > `[defaults].impersonate_service_account`).
+    pub fn resolve_impersonate_service_account(
+        &self,
+        cli_override: Option<&str>,
+    ) -> Option<String> {
+        cli_override
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                std::env::var("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT")
+                    .ok()
+                    .or_else(|| std::env::var("CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT").ok())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                self.defaults
+                    .impersonate_service_account
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
+    /// Resolve the GCP project ID for Vertex AI requests
+    /// (`VERTEX_PROJECT` > `GOOGLE_CLOUD_PROJECT` > `[ai.providers.vertex].project` > `cli_project` > `[defaults].project`).
+    pub fn get_vertex_project(&self, cli_project: Option<&str>) -> Option<String> {
+        let raw = std::env::var("VERTEX_PROJECT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GOOGLE_CLOUD_PROJECT")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                self.ai
+                    .providers
+                    .vertex
+                    .project
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                cli_project
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
+                self.defaults
+                    .project
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+            })?;
+
+        let first = raw.split(',').next().unwrap_or("").trim();
+        if let Some(rest) = first.strip_prefix("projects/") {
+            rest.split('/')
+                .next()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else if !first.is_empty() && !first.starts_with("file:") && !first.contains('/') {
+            Some(first.to_string())
+        } else {
+            None
+        }
+    }
+
+    /// Resolve the GCP region/location for Vertex AI (`VERTEX_LOCATION` > `CLOUD_ML_REGION` > `[ai.providers.vertex].location` > `"us-central1"`).
+    pub fn get_vertex_location(&self) -> String {
+        std::env::var("VERTEX_LOCATION")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("CLOUD_ML_REGION")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .or_else(|| {
+                self.ai
+                    .providers
+                    .vertex
+                    .location
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| "us-central1".to_string())
+            .trim()
+            .to_string()
     }
 
     /// Get API key for the currently active AI provider.

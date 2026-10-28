@@ -16,6 +16,11 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub log_level: Option<String>,
 
+    /// Impersonate a GCP service account email for all Cloud Logging & Vertex AI calls
+    /// (e.g. `sre-prod-reader@my-proj.iam.gserviceaccount.com`)
+    #[arg(long, global = true)]
+    pub impersonate_service_account: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -338,5 +343,22 @@ mod tests {
         // `racoon update`
         let root_update = Cli::try_parse_from(["racoon", "update"]).unwrap();
         assert!(matches!(root_update.command, Commands::Update));
+    }
+
+    #[test]
+    fn test_global_impersonate_service_account_flag() {
+        let cli = Cli::try_parse_from([
+            "racoon",
+            "--impersonate-service-account",
+            "sre-reader@prod-proj.iam.gserviceaccount.com",
+            "tail",
+            "--project",
+            "prod-proj",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.impersonate_service_account.as_deref(),
+            Some("sre-reader@prod-proj.iam.gserviceaccount.com")
+        );
     }
 }

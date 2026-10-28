@@ -58,14 +58,18 @@ async fn main() -> Result<()> {
         info!("racoon starting up 🦝");
     }
 
+    // Resolve optional IAM service account impersonation (CLI flag > env var > config)
+    let impersonate_sa =
+        config.resolve_impersonate_service_account(cli.impersonate_service_account.as_deref());
+
     // Dispatch to command handlers
     let result = match cli.command {
-        Commands::Tail(args) => handle_tail(args, &config).await,
-        Commands::Projects => handle_projects().await,
-        Commands::Auth => handle_auth().await,
-        Commands::Download(args) => handle_download(args, &config).await,
-        Commands::Query(args) => handle_query(args, &config).await,
-        Commands::Export(args) => handle_export(args, &config).await,
+        Commands::Tail(args) => handle_tail(args, &config, impersonate_sa).await,
+        Commands::Projects => handle_projects(impersonate_sa).await,
+        Commands::Auth => handle_auth(impersonate_sa).await,
+        Commands::Download(args) => handle_download(args, &config, impersonate_sa).await,
+        Commands::Query(args) => handle_query(args, &config, impersonate_sa).await,
+        Commands::Export(args) => handle_export(args, &config, impersonate_sa).await,
         Commands::View(args) => handle_view(args, &config).await,
         Commands::Config(args) => handle_config(args),
         Commands::Models(args) => handle_models(args, &config).await,
@@ -116,7 +120,11 @@ fn init_tracing(level: &str) -> Result<()> {
 }
 
 /// handle tail command
-async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
+async fn handle_tail(
+    args: TailArgs,
+    config: &Config,
+    impersonate_sa: Option<String>,
+) -> Result<()> {
     // Use config default for project if not specified
     let project = args
         .project
@@ -132,7 +140,7 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
     let duration = gcp_racoon::parse_duration_chrono(since_str)
         .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
 
-    let auth = GcpAuth::new()
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
         .await
         .context("Failed to initialize GCP authentication")?;
 
@@ -142,21 +150,22 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
 
     println!("✅ Connected to GCP");
 
-    // Try to initialize AI client for the configured provider/model
-    let gemini = match GeminiClient::from_config(config) {
-        Ok(client) => {
-            info!(
-                provider = client.provider().id(),
-                model = client.model(),
-                "AI features enabled"
-            );
-            Some(client)
-        }
-        Err(e) => {
-            warn!("AI features disabled: {}", e);
-            None
-        }
-    };
+    // Try to initialize AI client for the configured provider/model (supports zero-key Vertex AI ADC)
+    let gemini =
+        match GeminiClient::from_config_with_gcp(config, Some(auth.clone()), Some(&project)) {
+            Ok(client) => {
+                info!(
+                    provider = client.provider().id(),
+                    model = client.model(),
+                    "AI features enabled"
+                );
+                Some(client)
+            }
+            Err(e) => {
+                warn!("AI features disabled: {}", e);
+                None
+            }
+        };
 
     let client = LogsClient::new(auth.clone(), project.clone());
 
@@ -213,10 +222,12 @@ async fn handle_tail(args: TailArgs, config: &Config) -> Result<()> {
 }
 
 /// handle projects command
-async fn handle_projects() -> Result<()> {
+async fn handle_projects(impersonate_sa: Option<String>) -> Result<()> {
     println!("{}", "Fetching GCP projects...".dimmed());
 
-    let auth = GcpAuth::new().await.context("Authentication failed")?;
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
+        .await
+        .context("Authentication failed")?;
     auth.verify()
         .await
         .context("GCP credentials verification failed")?;
@@ -252,12 +263,12 @@ async fn handle_projects() -> Result<()> {
 }
 
 /// handle auth command
-async fn handle_auth() -> Result<()> {
+async fn handle_auth(impersonate_sa: Option<String>) -> Result<()> {
     info!("Verifying GCP authentication");
 
     println!("Checking GCP credentials...\n");
 
-    match GcpAuth::new().await {
+    match GcpAuth::with_impersonation(impersonate_sa).await {
         Ok(auth) => {
             let cred_info = auth.credential_info();
             println!(" Credential Source: {}", cred_info);
@@ -299,7 +310,11 @@ async fn handle_auth() -> Result<()> {
 }
 
 // handle download command
-async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
+async fn handle_download(
+    args: DownloadArgs,
+    config: &Config,
+    impersonate_sa: Option<String>,
+) -> Result<()> {
     info!(
         project = %args.project,
         output = %args.output,
@@ -308,7 +323,7 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
         "Downloading logs"
     );
 
-    let auth = GcpAuth::new()
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
         .await
         .context("Failed to initialize GCP authentication")?;
 
@@ -318,7 +333,7 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
 
     println!("✅ Authentication successful!");
 
-    let client = LogsClient::new(auth, args.project.clone());
+    let client = LogsClient::new(auth.clone(), args.project.clone());
 
     let options = ExportOptions {
         limit: args.limit,
@@ -326,8 +341,8 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
     };
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        let gemini = GeminiClient::from_config(config)
-            .context("AI download requires an API key for the active provider")?;
+        let gemini = GeminiClient::from_config_with_gcp(config, Some(auth), Some(&args.project))
+            .context("AI download requires valid credentials for the active provider")?;
 
         println!(
             "🦝 Generating query with {}/{}: \"{}\"",
@@ -351,7 +366,11 @@ async fn handle_download(args: DownloadArgs, config: &Config) -> Result<()> {
 }
 
 /// handle query command
-async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
+async fn handle_query(
+    args: QueryArgs,
+    config: &Config,
+    impersonate_sa: Option<String>,
+) -> Result<()> {
     let project = args
         .project
         .or_else(|| config.defaults.project.clone())
@@ -363,7 +382,7 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
-    let auth = GcpAuth::new()
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
         .await
         .context("Failed to initialize GCP authentication")?;
 
@@ -375,14 +394,14 @@ async fn handle_query(args: QueryArgs, config: &Config) -> Result<()> {
         println!("✅ Authentication successful!");
     }
 
-    let client = LogsClient::new(auth, project.clone());
+    let client = LogsClient::new(auth.clone(), project.clone());
 
     // Build filter starting with --since duration
     let mut filter = LogFilter::new().since(duration);
 
     if let Some(ref ai_prompt) = args.ai {
-        let gemini = GeminiClient::from_config(config)
-            .context("AI query requires an API key for the active provider")?;
+        let gemini = GeminiClient::from_config_with_gcp(config, Some(auth), Some(&project))
+            .context("AI query requires valid credentials for the active provider")?;
 
         if !args.json {
             println!(
@@ -513,11 +532,17 @@ async fn handle_view(args: ViewArgs, config: &Config) -> Result<()> {
 }
 
 /// Handle `racoon export` - advanced export with options
-async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
-    let auth = GcpAuth::new().await.context("Authentication failed")?;
+async fn handle_export(
+    args: ExportArgs,
+    config: &Config,
+    impersonate_sa: Option<String>,
+) -> Result<()> {
+    let auth = GcpAuth::with_impersonation(impersonate_sa)
+        .await
+        .context("Authentication failed")?;
     auth.verify().await?;
 
-    let client = LogsClient::new(auth, args.project.clone());
+    let client = LogsClient::new(auth.clone(), args.project.clone());
 
     let format: ExportFormat = args
         .format
@@ -537,8 +562,8 @@ async fn handle_export(args: ExportArgs, config: &Config) -> Result<()> {
     println!("   Format: {}", format.name());
 
     let result = if let Some(ref ai_prompt) = args.ai {
-        let gemini = GeminiClient::from_config(config)
-            .context("AI export requires an API key for the active provider")?;
+        let gemini = GeminiClient::from_config_with_gcp(config, Some(auth), Some(&args.project))
+            .context("AI export requires valid credentials for the active provider")?;
 
         println!(
             "   🦝 AI query ({}/{}): \"{}\"",
@@ -592,7 +617,12 @@ async fn handle_models(args: ModelsArgs, config: &Config) -> Result<()> {
                 );
                 println!("   Saved to: {}", saved_path.display());
 
-                if updated_config.get_provider_api_key(provider.id()).is_none() {
+                if provider == ProviderKind::VertexAi {
+                    println!(
+                        "   🔐 Uses GCP Application Default Credentials / IAM Impersonation (region: {})",
+                        updated_config.get_vertex_location().cyan()
+                    );
+                } else if updated_config.get_provider_api_key(provider.id()).is_none() {
                     println!(
                         "\n⚠️  Note: No API key detected for {}.",
                         provider.display_name().yellow()
@@ -620,7 +650,14 @@ async fn handle_models(args: ModelsArgs, config: &Config) -> Result<()> {
 
             for &provider in ProviderKind::all() {
                 let has_key = config.get_provider_api_key(provider.id()).is_some();
-                let key_status = if has_key {
+                let key_status = if provider == ProviderKind::VertexAi {
+                    format!(
+                        "🔐 GCP ADC / IAM Ready (location: {})",
+                        config.get_vertex_location()
+                    )
+                    .green()
+                    .to_string()
+                } else if has_key {
                     "🔑 API Key Configured".green().to_string()
                 } else {
                     format!("⚠️  Missing {}", provider.env_var())
@@ -804,6 +841,13 @@ fn handle_config(args: ConfigArgs) -> Result<()> {
             println!(
                 "  project: {}",
                 config.defaults.project.as_deref().unwrap_or("(not set)")
+            );
+            println!(
+                "  impersonate_service_account: {}",
+                config
+                    .resolve_impersonate_service_account(None)
+                    .as_deref()
+                    .unwrap_or("(not set)")
             );
             println!("  since: {}", config.defaults.since);
             println!("  limit: {}", config.defaults.limit);

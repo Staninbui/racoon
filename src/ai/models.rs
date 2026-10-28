@@ -20,6 +20,8 @@ use crate::config::Config;
 pub enum ProviderKind {
     /// Google Gemini (`generativelanguage.googleapis.com`)
     Google,
+    /// Google Cloud Vertex AI (`aiplatform.googleapis.com` via GCP ADC / IAM Impersonation)
+    VertexAi,
     /// OpenAI GPT (`api.openai.com`)
     OpenAi,
     /// Anthropic Claude (`api.anthropic.com`)
@@ -33,6 +35,7 @@ impl ProviderKind {
     pub fn all() -> &'static [ProviderKind] {
         &[
             ProviderKind::Google,
+            ProviderKind::VertexAi,
             ProviderKind::OpenAi,
             ProviderKind::Anthropic,
             ProviderKind::Agnes,
@@ -43,6 +46,7 @@ impl ProviderKind {
     pub fn id(&self) -> &'static str {
         match self {
             ProviderKind::Google => "google",
+            ProviderKind::VertexAi => "vertex",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Agnes => "agnes",
@@ -52,17 +56,19 @@ impl ProviderKind {
     /// Human-friendly display name for menus and CLI output.
     pub fn display_name(&self) -> &'static str {
         match self {
-            ProviderKind::Google => "Google (Gemini)",
+            ProviderKind::Google => "Google (Gemini API)",
+            ProviderKind::VertexAi => "Google Cloud Vertex AI (ADC / Zero-Key)",
             ProviderKind::OpenAi => "OpenAI (GPT)",
             ProviderKind::Anthropic => "Anthropic (Claude)",
             ProviderKind::Agnes => "Agnes AI",
         }
     }
 
-    /// Environment variable name used for this provider's API key.
+    /// Environment variable name used for this provider's API key (or ADC project for Vertex AI).
     pub fn env_var(&self) -> &'static str {
         match self {
             ProviderKind::Google => "GEMINI_API_KEY",
+            ProviderKind::VertexAi => "GOOGLE_CLOUD_PROJECT (uses GCP ADC)",
             ProviderKind::OpenAi => "OPENAI_API_KEY",
             ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
             ProviderKind::Agnes => "AGNES_API_KEY",
@@ -73,6 +79,7 @@ impl ProviderKind {
     pub fn default_base_url(&self) -> &'static str {
         match self {
             ProviderKind::Google => "https://generativelanguage.googleapis.com/v1beta/models",
+            ProviderKind::VertexAi => "https://us-central1-aiplatform.googleapis.com/v1",
             ProviderKind::OpenAi => "https://api.openai.com/v1",
             ProviderKind::Anthropic => "https://api.anthropic.com/v1",
             ProviderKind::Agnes => "https://apihub.agnes-ai.com/v1",
@@ -83,6 +90,9 @@ impl ProviderKind {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_lowercase().as_str() {
             "google" | "gemini" => ProviderKind::Google,
+            "vertex" | "vertex-ai" | "vertex_ai" | "gcp-vertex" | "vertexai" => {
+                ProviderKind::VertexAi
+            }
             "openai" | "gpt" => ProviderKind::OpenAi,
             "anthropic" | "claude" => ProviderKind::Anthropic,
             "agnes" | "agnes-ai" | "agnes_ai" => ProviderKind::Agnes,
@@ -279,10 +289,15 @@ impl ModelsRegistry {
                 let fallback = builtin_models(kind);
                 let count = fallback.len();
                 self.providers.insert(kind.id().to_string(), fallback);
+                let source = if kind == ProviderKind::VertexAi {
+                    "built-in baseline (uses GCP ADC / IAM credentials)".to_string()
+                } else {
+                    format!("built-in baseline (set {} for live sync)", kind.env_var())
+                };
                 statuses.push(ProviderUpdateStatus {
                     provider: kind,
                     count,
-                    source: format!("built-in baseline (set {} for live sync)", kind.env_var()),
+                    source,
                 });
             }
         }
@@ -298,7 +313,7 @@ impl ModelsRegistry {
 /// Built-in curated model lists for each provider.
 pub fn builtin_models(provider: ProviderKind) -> Vec<ModelInfo> {
     match provider {
-        ProviderKind::Google => vec![
+        ProviderKind::Google | ProviderKind::VertexAi => vec![
             ModelInfo::new(
                 "gemini-3.8-flash",
                 "Gemini 3.8 Flash",
@@ -440,6 +455,7 @@ async fn fetch_provider_models(
 ) -> Result<Vec<ModelInfo>, String> {
     let base = base_url.trim_end_matches('/');
     match provider {
+        ProviderKind::VertexAi => Ok(builtin_models(ProviderKind::VertexAi)),
         ProviderKind::Google => {
             let url = format!("{}?key={}", base, api_key);
             let resp = http
@@ -611,6 +627,9 @@ mod tests {
     fn test_provider_kind_parsing() {
         assert_eq!(ProviderKind::parse("google"), ProviderKind::Google);
         assert_eq!(ProviderKind::parse("gemini"), ProviderKind::Google);
+        assert_eq!(ProviderKind::parse("vertex"), ProviderKind::VertexAi);
+        assert_eq!(ProviderKind::parse("vertexai"), ProviderKind::VertexAi);
+        assert_eq!(ProviderKind::parse("vertex-ai"), ProviderKind::VertexAi);
         assert_eq!(ProviderKind::parse("openai"), ProviderKind::OpenAi);
         assert_eq!(ProviderKind::parse("gpt"), ProviderKind::OpenAi);
         assert_eq!(ProviderKind::parse("anthropic"), ProviderKind::Anthropic);

@@ -210,7 +210,9 @@ fn render_selector(
                 .iter()
                 .map(|&provider| {
                     let has_key = config.get_provider_api_key(provider.id()).is_some();
-                    let key_badge = if has_key {
+                    let key_badge = if provider == ProviderKind::VertexAi {
+                        "🔐 GCP ADC / IAM Ready".to_string()
+                    } else if has_key {
                         "🔑 API Key Ready".to_string()
                     } else {
                         format!("⚠️  Set {}", provider.env_var())
@@ -222,7 +224,7 @@ fn render_selector(
                     };
                     let count = registry.models_for(provider).len();
                     let line = format!(
-                        " {:<22} │ {:<24} │ {} models{}",
+                        " {:<38} │ {:<24} │ {} models{}",
                         provider.display_name(),
                         key_badge,
                         count,

@@ -362,7 +362,12 @@ async fn run_event_loop(
                         let _ = config.save();
                         app.ai_model_label = format!("{}/{}", provider.id(), model.id);
 
-                        match GeminiClient::from_config(&config) {
+                        let shared_auth = logs_client.map(|lc| lc.auth().clone());
+                        match GeminiClient::from_config_with_gcp(
+                            &config,
+                            shared_auth,
+                            Some(&app.project),
+                        ) {
                             Ok(new_client) => {
                                 app.ai_available = true;
                                 if let Some(tx) = ai_tx {
