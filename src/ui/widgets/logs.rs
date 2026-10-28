@@ -31,14 +31,25 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 ""
             };
+            let proj_tag = if app.is_multi_project {
+                entry
+                    .short_project_badge()
+                    .map(|p| format!(" [{}]", p))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
 
             let line = if let Some(badge) = entry.short_trace_badge() {
                 format!(
-                    "{}{} [{}] [{}] {}",
-                    anchor_mark, timestamp, severity, badge, message
+                    "{}{} [{}]{} [{}] {}",
+                    anchor_mark, timestamp, severity, proj_tag, badge, message
                 )
             } else {
-                format!("{}{} [{}] {}", anchor_mark, timestamp, severity, message)
+                format!(
+                    "{}{} [{}]{} {}",
+                    anchor_mark, timestamp, severity, proj_tag, message
+                )
             };
 
             let mut style = colors.severity_style(severity);

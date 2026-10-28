@@ -15,7 +15,9 @@ A powerful terminal UI for streaming, querying, and analyzing Google Cloud Platf
 - 🔴 **Real-time Log Streaming** - Watch logs as they happen with a beautiful TUI
 - 🚨 **Error Fingerprinting & Spike Radar (`c` key)** - Cluster repetitive error storms into canonical patterns with real-time Unicode velocity sparklines (`▁▂▃▄▅▆▇█`)
 - 🕵️ **Surrounding Instance Context (`s` key)** - Inspect ±5s of `INFO`/`DEBUG` logs on the exact same Pod / Cloud Run Revision / VM instance right before and after an error (even without a `trace_id`)
+- 🌐 **Multi-Project & Log View Streaming** - Monitor entire microservice chains across projects (`--project prod-apigw,prod-order,prod-payment`) or centralized Log Bucket Views in a single TUI with `[project]` badges
 - 🔗 **Distributed Trace Context (`x` / `E` keys)** - Isolate full request traces across microservices and run 1-keystroke Full-Trace / Context AI Root Cause Analysis (RCA)
+- 🪙 **Client-Side AI Token Optimizer** - Cuts LLM token consumption by 80%–98% via semantic JSON slimming, stacktrace folding, Shared Context extraction, RLE duplicate-pattern folding, and instant 0-token fingerprint LRU caching
 - 🔍 **Powerful Querying** - Use GCP filter syntax or natural language
 - 🤖 **Multi-Provider AI Analysis (`m` key)** - Switch seamlessly between Google Gemini (`gemini-3.8-flash`, `gemini-4-argon`), OpenAI, Anthropic, and Agnes AI
 - 🛡️ **Pre-AI PII & Secret Guard** - Automatically scrubs Bearer tokens, JWTs, API keys, URI passwords, Luhn credit cards, and customer emails locally before sending logs to any LLM

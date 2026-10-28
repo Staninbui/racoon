@@ -90,6 +90,9 @@ pub struct App {
     /// GCP project ID or offline file label.
     pub project: String,
 
+    /// Whether the session is monitoring or viewing logs across multiple GCP projects/views.
+    pub is_multi_project: bool,
+
     /// Whether we're actively streaming logs.
     pub is_streaming: bool,
 
@@ -124,6 +127,7 @@ pub struct App {
 impl App {
     /// Create a new App instance.
     pub fn new(project: String) -> Self {
+        let is_multi_project = crate::gcp::parse_resource_names(&project).len() > 1;
         Self {
             logs: VecDeque::with_capacity(DEFAULT_MAX_LOGS),
             offline_logs: None,
@@ -150,6 +154,7 @@ impl App {
             ai_model_label: "google/gemini-3.8-flash".to_string(),
             ai_pii_guard: true,
             project,
+            is_multi_project,
             is_streaming: true,
             should_quit: false,
             error_message: None,
@@ -184,6 +189,13 @@ impl App {
 
     /// Initialize with a static set of offline logs (disables live streaming).
     pub fn with_offline_logs(mut self, entries: Vec<LogEntry>) -> Self {
+        let distinct_projects: std::collections::HashSet<String> = entries
+            .iter()
+            .filter_map(|e| e.resolve_project_id(""))
+            .collect();
+        if distinct_projects.len() > 1 {
+            self.is_multi_project = true;
+        }
         self.max_logs = entries.len().max(self.max_logs);
         self.radar.rebuild_from_logs(&entries);
         self.logs = VecDeque::from(entries.clone());
@@ -752,6 +764,16 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
             }
             continue;
         }
+        if let Some(proj_val) = token
+            .strip_prefix("project=")
+            .or_else(|| token.strip_prefix("project_id="))
+        {
+            let proj_val = proj_val.trim_matches('"').trim_matches('\'');
+            if entry.resolve_project_id("").as_deref() != Some(proj_val) {
+                return false;
+            }
+            continue;
+        }
         if let Some(trace_val) = token.strip_prefix("trace=") {
             let trace_val = trace_val.trim_matches('"').trim_matches('\'');
             if entry.trace.as_deref() != Some(trace_val) {
@@ -1304,5 +1326,40 @@ mod tests {
         let url = app.selected_log_console_url().unwrap();
         assert!(url.contains("insertId%3D%22id-42%22"));
         assert!(url.ends_with("?project=prod-project-1"));
+    }
+
+    #[test]
+    fn test_app_multi_project_detection_and_project_filter() {
+        let live_multi = App::new("prod-apigw,prod-order,prod-payment".to_string());
+        assert!(live_multi.is_multi_project);
+
+        let entries = vec![
+            LogEntry {
+                log_name: Some("projects/prod-apigw/logs/stdout".to_string()),
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Gateway received request".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                log_name: Some("projects/prod-payment/logs/stderr".to_string()),
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Payment DB timeout".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        // Even when opened from an offline file, App auto-detects multi-project logs!
+        let mut offline_multi =
+            App::new("file:incident.json".to_string()).with_offline_logs(entries);
+        assert!(offline_multi.is_multi_project);
+        assert_eq!(offline_multi.logs.len(), 2);
+
+        // Filtering by `project=prod-payment` isolates logs from that specific project
+        offline_multi.set_filter(Some("project=prod-payment".to_string()));
+        assert_eq!(offline_multi.logs.len(), 1);
+        assert_eq!(
+            offline_multi.logs[0].short_project_badge().as_deref(),
+            Some("prod-payment")
+        );
     }
 }

@@ -14,5 +14,5 @@ pub mod projects;
 
 // Re-export commonly used types
 pub use auth::{AuthError, CredentialInfo, CredentialSource, GcpAuth};
-pub use logs::{LogEntry, LogFilter, LogsClient, LogsError, StreamHandle};
+pub use logs::{LogEntry, LogFilter, LogsClient, LogsError, StreamHandle, parse_resource_names};
 pub use projects::{Project, ProjectsClient, ProjectsError};

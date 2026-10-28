@@ -66,6 +66,38 @@ pub enum LogsError {
     ChannelClosed,
 }
 
+/// Parse a project or resource specification into Cloud Logging `resourceNames`.
+///
+/// Supports:
+/// - Single project ID: `"my-project"` -> `["projects/my-project"]`
+/// - Comma-separated multi-project IDs: `"prod-gw,prod-order,prod-pay"` ->
+///   `["projects/prod-gw", "projects/prod-order", "projects/prod-pay"]`
+/// - Full Cloud Logging resource / Log View paths:
+///   `"projects/my-proj/locations/global/buckets/_Default/views/_AllLogs"`,
+///   `"organizations/12345"`, `"folders/67890"`, `"billingAccounts/ABCDEF"`
+pub fn parse_resource_names(project_spec: &str) -> Vec<String> {
+    let mut resources = Vec::new();
+    for part in project_spec.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("projects/")
+            || trimmed.starts_with("organizations/")
+            || trimmed.starts_with("folders/")
+            || trimmed.starts_with("billingAccounts/")
+        {
+            resources.push(trimmed.to_string());
+        } else {
+            resources.push(format!("projects/{}", trimmed));
+        }
+    }
+    if resources.is_empty() && !project_spec.trim().is_empty() {
+        resources.push(format!("projects/{}", project_spec.trim()));
+    }
+    resources
+}
+
 /// Client for interacting with GCP logging API.
 #[derive(Clone)]
 pub struct LogsClient {
@@ -73,23 +105,37 @@ pub struct LogsClient {
     http: Client,
     /// GCP authentication manager.
     auth: GcpAuth,
-    /// Target GCP project ID.
+    /// Target GCP project ID(s) or resource specification.
     project: String,
+    /// Resolved Cloud Logging `resourceNames` list.
+    resource_names: Vec<String>,
 }
 
 impl LogsClient {
-    /// Create a new LogsClient for the specified project.
+    /// Create a new LogsClient for the specified project(s) or Log View resource name(s).
     pub fn new(auth: GcpAuth, project: String) -> Self {
+        let resource_names = parse_resource_names(&project);
         Self {
             http: Client::new(),
             auth,
             project,
+            resource_names,
         }
     }
 
-    /// Get the project ID this client is configured for.
+    /// Get the project ID or multi-project spec this client is configured for.
     pub fn project(&self) -> &str {
         &self.project
+    }
+
+    /// Get the resolved `resourceNames` sent to Cloud Logging `entries:list`.
+    pub fn resource_names(&self) -> &[String] {
+        &self.resource_names
+    }
+
+    /// Return `true` when querying/streaming across multiple GCP projects or views simultaneously.
+    pub fn is_multi_project(&self) -> bool {
+        self.resource_names.len() > 1
     }
 
     /// Query log entries from Cloud Logging, automatically paginating when `limit > 1000`.
@@ -157,7 +203,7 @@ impl LogsClient {
         let filter_str = filter.map(|f| f.build()).unwrap_or_default();
 
         let request_body = ListEntriesRequest {
-            resource_names: vec![format!("projects/{}", self.project)],
+            resource_names: self.resource_names.clone(),
             filter: if filter_str.is_empty() {
                 None
             } else {
@@ -209,7 +255,7 @@ impl LogsClient {
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
 
         let http = self.http.clone();
-        let project = self.project.clone();
+        let resource_names = self.resource_names.clone();
         let auth = self.auth.clone();
 
         let initial_timestamp = Utc::now() - lookback;
@@ -242,7 +288,7 @@ impl LogsClient {
                         };
                         poll_filter = poll_filter.timestamp_at_or_after(query_cursor);
 
-                        match poll_logs(&http, &auth, &project, &poll_filter, &dedup).await {
+                        match poll_logs(&http, &auth, &resource_names, &poll_filter, &dedup).await {
                             Ok(entries) => {
                                 consecutive_errors = 0;
 
@@ -339,7 +385,7 @@ impl StreamDeduplicator {
 async fn poll_logs(
     http: &Client,
     auth: &GcpAuth,
-    project: &str,
+    resource_names: &[String],
     filter: &LogFilter,
     dedup: &StreamDeduplicator,
 ) -> Result<Vec<LogEntry>, LogsError> {
@@ -350,7 +396,7 @@ async fn poll_logs(
 
     for _page in 0..MAX_POLL_PAGES {
         let request_body = ListEntriesRequest {
-            resource_names: vec![format!("projects/{}", project)],
+            resource_names: resource_names.to_vec(),
             filter: if filter_str.is_empty() {
                 None
             } else {
@@ -885,19 +931,32 @@ impl LogEntry {
             }
         }
 
-        let fb = fallback_project.trim();
-        let is_file_label = fb.is_empty()
-            || fb.starts_with("file:")
-            || fb.ends_with(".json")
-            || fb.ends_with(".ndjson")
-            || fb.ends_with(".jsonl")
-            || fb.contains('/')
-            || fb.contains('\\');
+        let fb_first = fallback_project.split(',').next().unwrap_or("").trim();
+        if let Some(rest) = fb_first.strip_prefix("projects/")
+            && let Some(pid) = rest.split('/').next()
+            && !pid.trim().is_empty()
+        {
+            return Some(pid.trim().to_string());
+        }
+
+        let is_file_label = fb_first.is_empty()
+            || fb_first.starts_with("file:")
+            || fb_first.ends_with(".json")
+            || fb_first.ends_with(".ndjson")
+            || fb_first.ends_with(".jsonl")
+            || fb_first.contains('/')
+            || fb_first.contains('\\');
         if !is_file_label {
-            return Some(fb.to_string());
+            return Some(fb_first.to_string());
         }
 
         None
+    }
+
+    /// Return a short `[project]` badge (max 16 chars) for Multi-Project TUI display.
+    pub fn short_project_badge(&self) -> Option<String> {
+        let pid = self.resolve_project_id("")?;
+        Some(shorten_id(&pid, 16))
     }
 
     /// Construct a Google Cloud Logs Explorer deep link URL for this log entry (`o` key).
@@ -1272,6 +1331,28 @@ mod tests {
         assert_eq!(
             empty.gcp_console_url("my-live-project").as_deref(),
             Some("https://console.cloud.google.com/logs/query?project=my-live-project")
+        );
+    }
+
+    #[test]
+    fn test_parse_resource_names_multi_project_and_log_views() {
+        assert_eq!(parse_resource_names("my-proj"), vec!["projects/my-proj"]);
+        assert_eq!(
+            parse_resource_names("prod-apigw, prod-order , prod-payment"),
+            vec![
+                "projects/prod-apigw",
+                "projects/prod-order",
+                "projects/prod-payment"
+            ]
+        );
+        assert_eq!(
+            parse_resource_names(
+                "projects/host-proj/locations/global/buckets/central/views/all-logs,organizations/123456"
+            ),
+            vec![
+                "projects/host-proj/locations/global/buckets/central/views/all-logs",
+                "organizations/123456"
+            ]
         );
     }
 }

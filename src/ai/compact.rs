@@ -439,12 +439,13 @@ fn compact_entry_payload_line(entry: &LogEntry) -> String {
     }
 }
 
-/// Extract a short service/instance identifier for an entry.
+/// Extract a short project + service/instance identifier for an entry.
 fn entry_instance_tag(entry: &LogEntry) -> Option<String> {
-    if let Some(ref res) = entry.resource
+    let proj = entry.resolve_project_id("");
+    let svc = if let Some(ref res) = entry.resource
         && let Some(ref labels) = res.labels
     {
-        for key in [
+        [
             "service_name",
             "pod_name",
             "revision_name",
@@ -452,18 +453,25 @@ fn entry_instance_tag(entry: &LogEntry) -> Option<String> {
             "container_name",
             "instance_id",
             "database_id",
-        ] {
-            if let Some(v) = labels.get(key)
-                && !v.trim().is_empty()
-            {
-                return Some(v.trim().to_string());
-            }
-        }
-        if !res.r#type.is_empty() {
-            return Some(res.r#type.clone());
-        }
+        ]
+        .into_iter()
+        .find_map(|key| {
+            labels
+                .get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .or_else(|| (!res.r#type.is_empty()).then(|| res.r#type.clone()))
+    } else {
+        None
+    };
+
+    match (proj, svc) {
+        (Some(p), Some(s)) => Some(format!("{}/{}", p, s)),
+        (None, Some(s)) => Some(s),
+        (Some(p), None) => Some(p),
+        (None, None) => None,
     }
-    None
 }
 
 struct FoldedEvent {

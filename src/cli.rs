@@ -58,7 +58,7 @@ pub enum Commands {
 /// the arguments for tail command
 #[derive(Parser, Debug)]
 pub struct TailArgs {
-    /// GCP project ID (uses config default if not specified)
+    /// GCP project ID(s) or Log View resource names (comma-separated, e.g. `prod-gw,prod-order`)
     #[arg(short, long)]
     pub project: Option<String>,
 
