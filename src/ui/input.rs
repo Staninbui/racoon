@@ -24,11 +24,16 @@ pub enum Action {
     ApplyFilter(Option<String>),
     /// Open interactive AI provider & model selector.
     SwitchModel,
+    /// Copy text to the system clipboard with a human-readable description.
+    CopyToClipboard { text: String, label: &'static str },
+    /// Open a URL in the default system browser.
+    OpenInBrowser(String),
 }
 
 /// Handle a keyboard event
 pub fn handle_key_event(app: &mut App, key: KeyEvent) -> Action {
     app.clear_error();
+    app.clear_status();
 
     match app.input_mode {
         InputMode::Normal => handle_normal_mode(app, key),
@@ -199,6 +204,43 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
         // Switch AI model interactively
         KeyCode::Char('m') => Action::SwitchModel,
 
+        // Yank selected log JSON (or Error Cluster summary + JSON) to clipboard (`y` key)
+        KeyCode::Char('y') => match app.yank_selected_log_text() {
+            Ok(text) => {
+                let label = if app.show_radar {
+                    "error cluster JSON"
+                } else {
+                    "selected log JSON"
+                };
+                Action::CopyToClipboard { text, label }
+            }
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
+
+        // Yank AI analysis Markdown to clipboard (`Y` / `Shift+y` key)
+        KeyCode::Char('Y') => match app.yank_ai_response_text() {
+            Ok(text) => Action::CopyToClipboard {
+                text,
+                label: "AI analysis Markdown",
+            },
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
+
+        // Open selected log entry in Google Cloud Logs Explorer (`o` key)
+        KeyCode::Char('o') => match app.selected_log_console_url() {
+            Ok(url) => Action::OpenInBrowser(url),
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
+
         // Clear search / exit Radar mode / exit Trace or Surrounding mode / clear filter
         KeyCode::Esc => {
             if app.show_radar {
@@ -233,6 +275,16 @@ fn handle_input_mode(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc => {
             app.exit_input_mode();
+            Action::None
+        }
+
+        KeyCode::Up => {
+            app.history_prev();
+            Action::None
+        }
+
+        KeyCode::Down => {
+            app.history_next();
             Action::None
         }
 
@@ -435,5 +487,65 @@ mod tests {
         app.ai_available = true;
         let action = handle_key_event(&mut app, make_key(KeyCode::Char('e')));
         assert!(matches!(action, Action::ExplainLog));
+    }
+
+    #[test]
+    fn test_yank_keys_y_and_shift_y_and_open_browser_o() {
+        let mut app = App::new("prod-gcp-proj".to_string()).with_offline_logs(vec![LogEntry {
+            insert_id: Some("ins-100".to_string()),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Gateway timeout".to_string()),
+            ..Default::default()
+        }]);
+
+        let y_action = handle_key_event(&mut app, make_key(KeyCode::Char('y')));
+        assert!(matches!(
+            y_action,
+            Action::CopyToClipboard {
+                label: "selected log JSON",
+                ref text
+            } if text.contains("Gateway timeout")
+        ));
+
+        // Pressing `Y` before AI response is present sets an error message
+        let shift_y_empty = handle_key_event(&mut app, make_key(KeyCode::Char('Y')));
+        assert!(matches!(shift_y_empty, Action::None));
+        assert!(app.error_message.is_some());
+
+        app.set_ai_response("### Root Cause\nUpstream timed out".to_string());
+        let shift_y_ok = handle_key_event(&mut app, make_key(KeyCode::Char('Y')));
+        assert!(matches!(
+            shift_y_ok,
+            Action::CopyToClipboard {
+                label: "AI analysis Markdown",
+                ref text
+            } if text.contains("Upstream timed out")
+        ));
+
+        let o_action = handle_key_event(&mut app, make_key(KeyCode::Char('o')));
+        assert!(matches!(
+            o_action,
+            Action::OpenInBrowser(ref url) if url.contains("project=prod-gcp-proj")
+        ));
+    }
+
+    #[test]
+    fn test_input_mode_up_down_history_keys() {
+        let mut app = App::new("test".to_string());
+
+        handle_key_event(&mut app, make_key(KeyCode::Char('f')));
+        for c in "severity>=ERROR".chars() {
+            handle_key_event(&mut app, make_key(KeyCode::Char(c)));
+        }
+        handle_key_event(&mut app, make_key(KeyCode::Enter));
+
+        handle_key_event(&mut app, make_key(KeyCode::Char('f')));
+        assert_eq!(app.input_buffer, "");
+
+        handle_key_event(&mut app, make_key(KeyCode::Up));
+        assert_eq!(app.input_buffer, "severity>=ERROR");
+
+        handle_key_event(&mut app, make_key(KeyCode::Down));
+        assert_eq!(app.input_buffer, "");
     }
 }

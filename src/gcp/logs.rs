@@ -858,6 +858,92 @@ impl LogEntry {
 
         Some((clauses.join(" "), badge))
     }
+
+    /// Resolve the GCP project ID associated with this log entry.
+    ///
+    /// Checks `resource.labels["project_id"]`, `log_name` (`projects/<id>/logs/...`),
+    /// `trace` (`projects/<id>/traces/...`), and falls back to `fallback_project` if it is
+    /// not an offline file label.
+    pub fn resolve_project_id(&self, fallback_project: &str) -> Option<String> {
+        if let Some(ref res) = self.resource
+            && let Some(ref labels) = res.labels
+            && let Some(pid) = labels.get("project_id")
+            && !pid.trim().is_empty()
+        {
+            return Some(pid.trim().to_string());
+        }
+
+        for resource_path in [self.log_name.as_deref(), self.trace.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(rest) = resource_path.strip_prefix("projects/")
+                && let Some(pid) = rest.split('/').next()
+                && !pid.trim().is_empty()
+            {
+                return Some(pid.trim().to_string());
+            }
+        }
+
+        let fb = fallback_project.trim();
+        let is_file_label = fb.is_empty()
+            || fb.starts_with("file:")
+            || fb.ends_with(".json")
+            || fb.ends_with(".ndjson")
+            || fb.ends_with(".jsonl")
+            || fb.contains('/')
+            || fb.contains('\\');
+        if !is_file_label {
+            return Some(fb.to_string());
+        }
+
+        None
+    }
+
+    /// Construct a Google Cloud Logs Explorer deep link URL for this log entry (`o` key).
+    pub fn gcp_console_url(&self, fallback_project: &str) -> Option<String> {
+        let project_id = self.resolve_project_id(fallback_project)?;
+
+        let mut clauses = Vec::new();
+        if let Some(rt) = self.resource_type() {
+            let rt = rt.trim();
+            if !rt.is_empty() {
+                clauses.push(format!("resource.type=\"{}\"", rt));
+            }
+        }
+
+        if let Some(ref id) = self.insert_id
+            && !id.trim().is_empty()
+        {
+            clauses.push(format!("insertId=\"{}\"", id.trim()));
+        } else if let Some((corr_clause, _)) = self.correlation_id() {
+            clauses.push(corr_clause);
+        } else if let Some(ref sev) = self.severity
+            && !sev.trim().is_empty()
+        {
+            clauses.push(format!("severity={}", sev.trim()));
+        }
+
+        let mut url = String::from("https://console.cloud.google.com/logs/query");
+        if !clauses.is_empty() {
+            let query_str = clauses.join("\n");
+            url.push_str(&format!(";query={}", crate::utils::url_encode(&query_str)));
+        }
+
+        if let Some(ts) = self.timestamp.or(self.receive_timestamp) {
+            let ts_str = ts.to_rfc3339();
+            url.push_str(&format!(
+                ";cursorTimestamp={}",
+                crate::utils::url_encode(&ts_str)
+            ));
+        }
+
+        url.push_str(&format!(
+            "?project={}",
+            crate::utils::url_encode(&project_id)
+        ));
+        Some(url)
+    }
 }
 
 fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
@@ -1152,5 +1238,40 @@ mod tests {
         assert!(filter.contains("timestamp<=\"2026-10-27T13:00:15+00:00\""));
         assert!(!filter.contains("severity"));
         assert_eq!(badge, "order-svc-7d9f8b-x2k ±5s @ 13:00:10");
+    }
+
+    #[test]
+    fn test_log_entry_gcp_console_url_and_project_resolution() {
+        let ts = DateTime::parse_from_rfc3339("2026-10-27T13:00:10Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let entry = LogEntry {
+            insert_id: Some("ins-98765".to_string()),
+            timestamp: Some(ts),
+            log_name: Some(
+                "projects/prod-payments-42/logs/run.googleapis.com%2Fstderr".to_string(),
+            ),
+            resource: Some(MonitoredResource {
+                r#type: "cloud_run_revision".to_string(),
+                labels: None,
+            }),
+            ..Default::default()
+        };
+
+        // Even when viewing an offline file ("file:incident.json"), `resolve_project_id`
+        // extracts `prod-payments-42` from `log_name`!
+        let url = entry.gcp_console_url("file:incident.json").unwrap();
+        assert!(url.starts_with("https://console.cloud.google.com/logs/query;query="));
+        assert!(url.contains("insertId%3D%22ins-98765%22"));
+        assert!(url.contains("cursorTimestamp=2026-10-27T13%3A00%3A10%2B00%3A00"));
+        assert!(url.ends_with("?project=prod-payments-42"));
+
+        // An empty offline log with no project metadata and a file fallback returns None
+        let empty = LogEntry::default();
+        assert!(empty.gcp_console_url("file:incident.json").is_none());
+        assert_eq!(
+            empty.gcp_console_url("my-live-project").as_deref(),
+            Some("https://console.cloud.google.com/logs/query?project=my-live-project")
+        );
     }
 }

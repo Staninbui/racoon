@@ -426,6 +426,28 @@ async fn run_event_loop(
                             .await;
                     }
                 }
+                input::Action::CopyToClipboard { text, label } => {
+                    match crate::utils::copy_to_clipboard(&text) {
+                        Ok(()) => {
+                            app.set_status(format!(
+                                "📋 Copied {} ({} bytes) to clipboard",
+                                label,
+                                text.len()
+                            ));
+                        }
+                        Err(e) => {
+                            app.set_error(format!("Clipboard copy failed: {}", e));
+                        }
+                    }
+                }
+                input::Action::OpenInBrowser(url) => match crate::utils::open_in_browser(&url) {
+                    Ok(()) => {
+                        app.set_status(format!("🌐 Opened in GCP Logs Explorer: {}", url));
+                    }
+                    Err(e) => {
+                        app.set_error(format!("Failed to open browser: {}", e));
+                    }
+                },
                 input::Action::GenerateQuery(_) | input::Action::None => {}
             }
         }

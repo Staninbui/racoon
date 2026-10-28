@@ -45,6 +45,15 @@ pub struct App {
     /// Text in the query/search input.
     pub input_buffer: String,
 
+    /// Previously submitted non-empty filter/search/AI queries (oldest first).
+    pub input_history: Vec<String>,
+
+    /// Current cursor position within `input_history` when navigating with Up/Down.
+    pub history_index: Option<usize>,
+
+    /// Unsubmitted draft saved when starting Up/Down history navigation.
+    pub history_draft: String,
+
     /// Current filter string (applied to logs).
     pub filter: Option<String>,
 
@@ -90,6 +99,9 @@ pub struct App {
     /// Error message to display (if any).
     pub error_message: Option<String>,
 
+    /// Transient confirmation/status message to display (e.g., clipboard yank or browser launch).
+    pub status_message: Option<String>,
+
     /// Scroll offset for the detail pane.
     pub detail_scroll: u16,
 
@@ -123,6 +135,9 @@ impl App {
             radar_selected_index: 0,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            input_history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
             filter: None,
             active_trace: None,
             active_surrounding: None,
@@ -138,6 +153,7 @@ impl App {
             is_streaming: true,
             should_quit: false,
             error_message: None,
+            status_message: None,
             detail_scroll: 0,
             ai_scroll: 0,
             search_query: None,
@@ -495,11 +511,15 @@ impl App {
     pub fn enter_input_mode(&mut self, mode: InputMode) {
         self.input_mode = mode;
         self.input_buffer.clear();
+        self.history_index = None;
+        self.history_draft.clear();
     }
 
     pub fn exit_input_mode(&mut self) {
         self.input_mode = InputMode::Normal;
         self.input_buffer.clear();
+        self.history_index = None;
+        self.history_draft.clear();
     }
 
     pub fn input_char(&mut self, c: char) {
@@ -510,19 +530,112 @@ impl App {
         self.input_buffer.pop();
     }
 
+    /// Navigate backward (`Up` arrow) through previously submitted inputs.
+    pub fn history_prev(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                self.history_draft = self.input_buffer.clone();
+                let idx = self.input_history.len() - 1;
+                self.history_index = Some(idx);
+                self.input_buffer = self.input_history[idx].clone();
+            }
+            Some(idx) => {
+                let new_idx = idx.saturating_sub(1);
+                self.history_index = Some(new_idx);
+                self.input_buffer = self.input_history[new_idx].clone();
+            }
+        }
+    }
+
+    /// Navigate forward (`Down` arrow) through previously submitted inputs, restoring draft at bottom.
+    pub fn history_next(&mut self) {
+        if let Some(idx) = self.history_index {
+            if idx + 1 < self.input_history.len() {
+                let new_idx = idx + 1;
+                self.history_index = Some(new_idx);
+                self.input_buffer = self.input_history[new_idx].clone();
+            } else {
+                self.history_index = None;
+                self.input_buffer = self.history_draft.clone();
+            }
+        }
+    }
+
     pub fn submit_input(&mut self) -> (String, InputMode) {
         let text = self.input_buffer.clone();
         let mode = self.input_mode;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if self.input_history.last().map(|s| s.as_str()) != Some(text.as_str()) {
+                self.input_history.push(text.clone());
+            }
+            if self.input_history.len() > 100 {
+                self.input_history.remove(0);
+            }
+        }
         self.exit_input_mode();
         (text, mode)
     }
 
     pub fn set_error(&mut self, message: String) {
         self.error_message = Some(message);
+        self.status_message = None;
     }
 
     pub fn clear_error(&mut self) {
         self.error_message = None;
+    }
+
+    pub fn set_status(&mut self, message: String) {
+        self.status_message = Some(message);
+        self.error_message = None;
+    }
+
+    pub fn clear_status(&mut self) {
+        self.status_message = None;
+    }
+
+    /// Format the currently selected log entry (or Error Cluster in Radar view) as pretty JSON for clipboard yank (`y` key).
+    pub fn yank_selected_log_text(&self) -> Result<String, String> {
+        if let Some(cluster) = self.selected_cluster() {
+            let sample_json = serde_json::to_string_pretty(&cluster.sample_entry)
+                .map_err(|e| format!("Failed to serialize cluster sample log: {}", e))?;
+            Ok(format!(
+                "// Error Cluster [x{} occurrences | {} | first: {} | last: {}]\n// Fingerprint: {}\n{}",
+                cluster.count,
+                cluster.severity,
+                cluster.first_seen,
+                cluster.last_seen,
+                cluster.fingerprint,
+                sample_json
+            ))
+        } else if let Some(entry) = self.selected_log() {
+            serde_json::to_string_pretty(entry)
+                .map_err(|e| format!("Failed to serialize log entry: {}", e))
+        } else {
+            Err("No log entry selected to copy.".to_string())
+        }
+    }
+
+    /// Return the current AI analysis Markdown for clipboard yank (`Y` / `Shift+y` key).
+    pub fn yank_ai_response_text(&self) -> Result<String, String> {
+        self.ai_response.clone().ok_or_else(|| {
+            "No AI analysis available to copy yet (press 'e' or 'E' first).".to_string()
+        })
+    }
+
+    /// Build the Google Cloud Logs Explorer deep link URL for the currently selected log entry (`o` key).
+    pub fn selected_log_console_url(&self) -> Result<String, String> {
+        let entry = self
+            .selected_log()
+            .ok_or_else(|| "No log entry selected.".to_string())?;
+        entry.gcp_console_url(&self.project).ok_or_else(|| {
+            "Cannot determine GCP project ID for Console URL (offline log has no project metadata)."
+                .to_string()
+        })
     }
 
     pub fn search(&mut self, query: &str) {
@@ -1125,5 +1238,71 @@ mod tests {
         assert_eq!(restored.as_deref(), Some("severity>=ERROR"));
         assert!(app.active_surrounding.is_none());
         assert_eq!(app.logs.len(), 1);
+    }
+
+    #[test]
+    fn test_app_input_history_navigation_and_draft_preservation() {
+        let mut app = App::new("test".to_string());
+
+        app.enter_input_mode(InputMode::Filter);
+        app.input_buffer = "severity>=ERROR".to_string();
+        app.submit_input();
+
+        app.enter_input_mode(InputMode::Search);
+        app.input_buffer = "connection reset".to_string();
+        app.submit_input();
+
+        // Consecutive duplicate should not be recorded twice
+        app.enter_input_mode(InputMode::Search);
+        app.input_buffer = "connection reset".to_string();
+        app.submit_input();
+        assert_eq!(app.input_history.len(), 2);
+
+        // Start typing a new draft, then navigate Up/Down
+        app.enter_input_mode(InputMode::Filter);
+        app.input_buffer = "my draft".to_string();
+
+        app.history_prev();
+        assert_eq!(app.input_buffer, "connection reset");
+
+        app.history_prev();
+        assert_eq!(app.input_buffer, "severity>=ERROR");
+
+        // Pressing Up at the oldest entry stays at oldest
+        app.history_prev();
+        assert_eq!(app.input_buffer, "severity>=ERROR");
+
+        // Pressing Down moves forward and then restores the unsubmitted draft
+        app.history_next();
+        assert_eq!(app.input_buffer, "connection reset");
+
+        app.history_next();
+        assert_eq!(app.input_buffer, "my draft");
+        assert!(app.history_index.is_none());
+    }
+
+    #[test]
+    fn test_app_yank_and_console_url_helpers() {
+        let mut app = App::new("prod-project-1".to_string()).with_offline_logs(vec![LogEntry {
+            insert_id: Some("id-42".to_string()),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Disk full".to_string()),
+            ..Default::default()
+        }]);
+
+        let log_json = app.yank_selected_log_text().unwrap();
+        assert!(log_json.contains("\"insertId\": \"id-42\""));
+        assert!(log_json.contains("Disk full"));
+
+        assert!(app.yank_ai_response_text().is_err());
+        app.set_ai_response("### Root Cause\nDisk `/var/log` reached 100%".to_string());
+        assert_eq!(
+            app.yank_ai_response_text().unwrap(),
+            "### Root Cause\nDisk `/var/log` reached 100%"
+        );
+
+        let url = app.selected_log_console_url().unwrap();
+        assert!(url.contains("insertId%3D%22id-42%22"));
+        assert!(url.ends_with("?project=prod-project-1"));
     }
 }

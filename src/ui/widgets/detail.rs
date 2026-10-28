@@ -56,7 +56,7 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(colors.fg))
         .block(
             Block::default()
-                .title(" Detail (Ctrl+j/k to scroll) ")
+                .title(" Detail (y: copy JSON, o: open GCP, Ctrl+j/k: scroll) ")
                 .borders(Borders::ALL)
                 .border_style(colors.border_focused_style()),
         )
@@ -105,6 +105,8 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             "Press 'c' to toggle Error Fingerprint & Spike Radar",
             "Press 'x' to isolate full request trace across services",
             "Press 'E' (Shift+e) for Full-Trace / Context AI Root Cause Analysis",
+            "Press 'y' / 'Y' to copy Log JSON or AI Analysis to clipboard",
+            "Press 'o' to open selected log in Google Cloud Logs Explorer",
             "Press '?' to ask a natural-language question about your logs",
             "Press 'm' to switch AI Provider & Model interactively",
         ]
@@ -113,9 +115,9 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let ai_title = if app.ai_pii_guard {
-        " AI Analysis 🛡️ PII Guard (Ctrl+n/p to scroll) "
+        " AI Analysis 🛡️ PII Guard (Y: copy, Ctrl+n/p: scroll) "
     } else {
-        " AI Analysis (Ctrl+n/p to scroll) "
+        " AI Analysis (Y: copy, Ctrl+n/p: scroll) "
     };
 
     let paragraph = Paragraph::new(content)

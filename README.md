@@ -19,6 +19,7 @@ A powerful terminal UI for streaming, querying, and analyzing Google Cloud Platf
 - 🔍 **Powerful Querying** - Use GCP filter syntax or natural language
 - 🤖 **Multi-Provider AI Analysis (`m` key)** - Switch seamlessly between Google Gemini (`gemini-3.8-flash`, `gemini-4-argon`), OpenAI, Anthropic, and Agnes AI
 - 🛡️ **Pre-AI PII & Secret Guard** - Automatically scrubs Bearer tokens, JWTs, API keys, URI passwords, Luhn credit cards, and customer emails locally before sending logs to any LLM
+- 📋 **On-Call Productivity Shortcuts (`y` / `Y` / `o` keys)** - 1-keystroke copy of log JSON or AI RCA Markdown to clipboard, deep-link jump to Google Cloud Logs Explorer in browser, and `↑`/`↓` command input history
 - 📁 **Offline Mode** - Export logs (paginated JSON or streaming NDJSON) and analyze them later without internet
 - 🎨 **Themeable** - Dark and light themes for comfortable viewing
 - ⌨️ **Vim-style Navigation** - Efficient keyboard-driven interface
@@ -186,12 +187,15 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `x` | Toggle **Distributed Trace Context** (isolate request by `trace`, `spanId`, or `request_id`) |
 | `e` | Explain selected log (or selected Error Cluster) with AI |
 | `E` (`Shift+e`) | Run **Full-Trace / Surrounding Context AI Root Cause Analysis (RCA)** |
+| `y` | Copy selected log JSON (or Error Cluster summary + JSON) to clipboard |
+| `Y` (`Shift+y`) | Copy AI analysis / RCA Markdown report to clipboard |
+| `o` | Open selected log entry in **Google Cloud Logs Explorer** in browser |
 | `?` | Ask AI a question (or set filters in natural language) |
 | `m` | Open interactive AI Provider & Model selector |
-| `/` | Search within logs |
+| `/` | Search within logs (`↑` / `↓` in input bar cycles history) |
 | `n` | Next search match |
 | `N` | Previous search match |
-| `f` | Set GCP filter |
+| `f` | Set GCP filter (`↑` / `↓` in input bar cycles history) |
 | `p` | Pause/resume streaming |
 | `t` | Toggle theme (dark/light) |
 | `Ctrl+j/k` | Scroll detail pane |
