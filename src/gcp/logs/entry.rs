@@ -181,20 +181,90 @@ impl LogEntry {
         false
     }
 
-    /// Get the full log message.
+    /// Get the full log message, intelligently extracting human-readable text from
+    /// `textPayload`, common structured `jsonPayload` fields (`message`, `msg`, `event`,
+    /// `error`, `err`, `reason`, `description`), or `httpRequest` summaries.
     pub fn message(&self) -> String {
-        if let Some(text) = &self.text_payload {
+        if let Some(text) = &self.text_payload
+            && !text.trim().is_empty()
+        {
             return text.clone();
         }
 
         if let Some(json) = &self.json_payload {
-            if let Some(msg) = json.get("message").and_then(|v| v.as_str()) {
-                return msg.to_string();
+            const MSG_KEYS: &[&str] = &[
+                "message",
+                "msg",
+                "event",
+                "error",
+                "err",
+                "reason",
+                "description",
+                "detail",
+            ];
+            for &key in MSG_KEYS {
+                if let Some(val) = json.get(key) {
+                    if let Some(msg) = val.as_str()
+                        && !msg.trim().is_empty()
+                    {
+                        return msg.to_string();
+                    }
+                    if matches!(key, "error" | "err")
+                        && let Some(nested_msg) = val
+                            .get("message")
+                            .or_else(|| val.get("msg"))
+                            .and_then(|v| v.as_str())
+                        && !nested_msg.trim().is_empty()
+                    {
+                        return nested_msg.to_string();
+                    }
+                }
             }
+
+            if json.as_object().is_some_and(|m| m.is_empty())
+                && let Some(http_str) = self.http_summary()
+            {
+                return http_str;
+            }
+
             return serde_json::to_string(json).unwrap_or_else(|_| "[invalid json]".to_string());
         }
 
+        if let Some(http_str) = self.http_summary() {
+            return http_str;
+        }
+
         "[no message]".to_string()
+    }
+
+    /// Format a concise summary line from `httpRequest` when present
+    /// (e.g., `"POST 503 https://api.acme.com/v2/checkout (5.004s)"`).
+    pub fn http_summary(&self) -> Option<String> {
+        let req = self.http_request.as_ref()?;
+        let mut parts = Vec::new();
+        if let Some(ref method) = req.request_method
+            && !method.trim().is_empty()
+        {
+            parts.push(method.trim().to_string());
+        }
+        if let Some(status) = req.status {
+            parts.push(status.to_string());
+        }
+        if let Some(ref url) = req.request_url
+            && !url.trim().is_empty()
+        {
+            parts.push(url.trim().to_string());
+        }
+        if let Some(ref latency) = req.latency
+            && !latency.trim().is_empty()
+        {
+            parts.push(format!("({})", latency.trim()));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
     }
 
     /// Get the formatted timestamp.
@@ -500,7 +570,7 @@ pub struct MonitoredResource {
 }
 
 /// HTTP request information attached to a log entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpRequest {
     /// The request method (GET, POST, etc.).

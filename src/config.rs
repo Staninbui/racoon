@@ -316,6 +316,14 @@ impl Config {
             .join("config.toml")
     }
 
+    /// Get the persistent TUI input history file path (`~/.config/racoon/history.json`).
+    pub fn history_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("racoon")
+            .join("history.json")
+    }
+
     /// Get API key for a specific provider (environment variable takes precedence over config file).
     pub fn get_provider_api_key(&self, provider: &str) -> Option<String> {
         use crate::ai::ProviderKind;

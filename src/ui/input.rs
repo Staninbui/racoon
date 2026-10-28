@@ -5,7 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::app::{App, InputMode};
+use super::app::{ActivePane, App, InputMode};
 
 /// Actions that may be triggered by keyboard events.
 #[derive(Debug)]
@@ -28,6 +28,8 @@ pub enum Action {
     CopyToClipboard { text: String, label: &'static str },
     /// Open a URL in the default system browser.
     OpenInBrowser(String),
+    /// Export a self-contained Markdown incident report (`w` key).
+    SaveIncidentReport,
 }
 
 /// Handle a keyboard event
@@ -84,35 +86,114 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
-        // Navigation
+        // Navigation (routes to the currently focused pane: Logs, Detail, or AI)
         KeyCode::Char('j') | KeyCode::Down => {
-            app.select_next();
+            match app.focused_pane {
+                ActivePane::Logs => app.select_next(),
+                ActivePane::Detail => app.scroll_detail_down(),
+                ActivePane::Ai => app.scroll_ai_down(),
+            }
             Action::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.select_previous();
+            match app.focused_pane {
+                ActivePane::Logs => app.select_previous(),
+                ActivePane::Detail => app.scroll_detail_up(),
+                ActivePane::Ai => app.scroll_ai_up(),
+            }
             Action::None
         }
         KeyCode::Char('g') | KeyCode::Home => {
-            app.select_first();
+            match app.focused_pane {
+                ActivePane::Logs => app.select_first(),
+                ActivePane::Detail => app.reset_detail_scroll(),
+                ActivePane::Ai => app.reset_ai_scroll(),
+            }
             Action::None
         }
         KeyCode::Char('G') | KeyCode::End => {
-            app.select_last();
+            match app.focused_pane {
+                ActivePane::Logs => app.select_last(),
+                ActivePane::Detail => {
+                    for _ in 0..50 {
+                        app.scroll_detail_down();
+                    }
+                }
+                ActivePane::Ai => {
+                    for _ in 0..50 {
+                        app.scroll_ai_down();
+                    }
+                }
+            }
             Action::None
         }
         KeyCode::PageDown => {
             for _ in 0..10 {
-                app.select_next();
+                match app.focused_pane {
+                    ActivePane::Logs => app.select_next(),
+                    ActivePane::Detail => app.scroll_detail_down(),
+                    ActivePane::Ai => app.scroll_ai_down(),
+                }
             }
             Action::None
         }
         KeyCode::PageUp => {
             for _ in 0..10 {
-                app.select_previous();
+                match app.focused_pane {
+                    ActivePane::Logs => app.select_previous(),
+                    ActivePane::Detail => app.scroll_detail_up(),
+                    ActivePane::Ai => app.scroll_ai_up(),
+                }
             }
             Action::None
         }
+
+        // Cycle pane focus (`Tab` / `Shift+Tab`) and toggle full-screen maximize (`z`)
+        KeyCode::Tab => {
+            app.focus_next_pane();
+            Action::None
+        }
+        KeyCode::BackTab => {
+            app.focus_prev_pane();
+            Action::None
+        }
+        KeyCode::Char('z') => {
+            app.toggle_maximize_pane();
+            Action::None
+        }
+
+        // Mute / exclude selected log pattern (`-` key)
+        KeyCode::Char('-') => {
+            if let Err(err_msg) = app.mute_selected_pattern() {
+                app.set_error(err_msg);
+            }
+            Action::None
+        }
+
+        // Resize Surrounding Context window (`[` to shrink, `]` / `+` / `=` to expand)
+        KeyCode::Char(']') | KeyCode::Char('+') | KeyCode::Char('=')
+            if app.active_surrounding.is_some() =>
+        {
+            match app.resize_surrounding_window(true) {
+                Ok(new_filter) => Action::ApplyFilter(Some(new_filter)),
+                Err(err_msg) => {
+                    app.set_error(err_msg);
+                    Action::None
+                }
+            }
+        }
+        KeyCode::Char('[') if app.active_surrounding.is_some() => {
+            match app.resize_surrounding_window(false) {
+                Ok(new_filter) => Action::ApplyFilter(Some(new_filter)),
+                Err(err_msg) => {
+                    app.set_error(err_msg);
+                    Action::None
+                }
+            }
+        }
+
+        // Save self-contained Markdown incident snapshot (`w` key)
+        KeyCode::Char('w') => Action::SaveIncidentReport,
 
         // Input modes
         KeyCode::Char('/') => {
@@ -241,8 +322,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             }
         },
 
-        // Clear search / exit Radar mode / exit Trace or Surrounding mode / clear filter
+        // Clear maximize / search / exit Radar mode / exit Trace or Surrounding mode / clear filter
         KeyCode::Esc => {
+            if app.maximized_pane.is_some() {
+                app.maximized_pane = None;
+                return Action::None;
+            }
             if app.show_radar {
                 app.show_radar = false;
                 return Action::None;
@@ -583,5 +668,53 @@ mod tests {
 
         handle_key_event(&mut app, make_key(KeyCode::Down));
         assert_eq!(app.input_buffer, "");
+    }
+
+    #[test]
+    fn test_tab_focus_z_maximize_mute_and_incident_export_keys() {
+        use crate::ui::app::ActivePane;
+
+        let mut app = App::new("prod-proj".to_string()).with_offline_logs(vec![
+            LogEntry {
+                severity: Some("WARNING".to_string()),
+                text_payload: Some("Noisy probe 1".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Critical failure".to_string()),
+                ..Default::default()
+            },
+        ]);
+
+        // Tab cycles focus Logs -> Detail -> Ai -> Logs
+        handle_key_event(&mut app, make_key(KeyCode::Tab));
+        assert_eq!(app.focused_pane, ActivePane::Detail);
+
+        // In Detail focus, 'j' scrolls detail pane instead of moving log selection
+        handle_key_event(&mut app, make_key(KeyCode::Char('j')));
+        assert_eq!(app.detail_scroll, 1);
+        assert_eq!(app.selected_index, 0);
+
+        // 'z' maximizes the currently focused pane (Detail)
+        handle_key_event(&mut app, make_key(KeyCode::Char('z')));
+        assert_eq!(app.maximized_pane, Some(ActivePane::Detail));
+
+        // Pressing Esc exits maximize mode first
+        handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(app.maximized_pane.is_none());
+
+        // Return focus to Logs (`Shift+Tab` / BackTab)
+        handle_key_event(&mut app, make_key(KeyCode::BackTab));
+        assert_eq!(app.focused_pane, ActivePane::Logs);
+
+        // '-' mutes the selected noisy log pattern
+        handle_key_event(&mut app, make_key(KeyCode::Char('-')));
+        assert_eq!(app.logs.len(), 1);
+        assert_eq!(app.logs[0].message(), "Critical failure");
+
+        // 'w' triggers SaveIncidentReport action
+        let w_action = handle_key_event(&mut app, make_key(KeyCode::Char('w')));
+        assert!(matches!(w_action, Action::SaveIncidentReport));
     }
 }

@@ -63,6 +63,67 @@ mod tests {
     }
 
     #[test]
+    fn test_smart_log_entry_message_fallbacks() {
+        // 1. Go zap/zerolog style `msg`
+        let zap_entry = LogEntry {
+            json_payload: Some(serde_json::json!({"level": "error", "msg": "grpc dial timeout"})),
+            ..Default::default()
+        };
+        assert_eq!(zap_entry.message(), "grpc dial timeout");
+
+        // 2. Python structlog style `event`
+        let structlog_entry = LogEntry {
+            json_payload: Some(serde_json::json!({"event": "user_login_failed", "user_id": 42})),
+            ..Default::default()
+        };
+        assert_eq!(structlog_entry.message(), "user_login_failed");
+
+        // 3. Nested `error.message` object (GCP Error Reporting / Envoy / Node.js)
+        let nested_err_entry = LogEntry {
+            json_payload: Some(serde_json::json!({
+                "error": { "code": 504, "message": "upstream request timeout" }
+            })),
+            ..Default::default()
+        };
+        assert_eq!(nested_err_entry.message(), "upstream request timeout");
+
+        // 4. Pure HTTP Load Balancer / Cloud Run request log without textPayload or jsonPayload
+        let http_only_entry = LogEntry {
+            http_request: Some(HttpRequest {
+                request_method: Some("POST".to_string()),
+                request_url: Some("https://api.acme.com/v2/checkout".to_string()),
+                status: Some(503),
+                latency: Some("5.004s".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            http_only_entry.message(),
+            "POST 503 https://api.acme.com/v2/checkout (5.004s)"
+        );
+    }
+
+    #[test]
+    fn test_negated_fingerprint_local_filter() {
+        let noisy_entry = LogEntry {
+            severity: Some("WARNING".to_string()),
+            text_payload: Some("High memory usage 85%".to_string()),
+            ..Default::default()
+        };
+        let real_err_entry = LogEntry {
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Redis connection failed on port 6379".to_string()),
+            ..Default::default()
+        };
+
+        let filter_expr = "severity>=WARNING -fingerprint:\"High memory usage <N>%\"";
+        assert!(is_local_only_filter(filter_expr));
+        assert!(!matches_local_filter(&noisy_entry, filter_expr));
+        assert!(matches_local_filter(&real_err_entry, filter_expr));
+    }
+
+    #[test]
     fn test_log_entry_to_line() {
         let entry = LogEntry {
             timestamp: Some(Utc::now()),

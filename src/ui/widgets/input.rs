@@ -52,7 +52,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(ref scope) = app.active_surrounding {
         let filter_str = app.filter.as_deref().unwrap_or("");
         Paragraph::new(format!(
-            "🕵️ Surrounding Mode ({}) │ 🎯 marks anchor log │ Filter: {}\ns/Esc: Exit & Restore │ E: Context AI RCA │ y/Y: Copy │ o: Open GCP │ e: Explain",
+            "🕵️ Surrounding Mode ({}) │ 🎯 marks anchor log │ Filter: {}\n[/]: Shrink/Expand Window │ s/Esc: Exit & Restore │ E: AI RCA │ w: Save Report │ y/Y: Copy",
             scope, filter_str
         ))
         .style(Style::default().fg(Color::Yellow))
@@ -64,7 +64,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
     } else if let Some(ref trace_id) = app.active_trace {
         let filter_str = app.filter.as_deref().unwrap_or("");
         Paragraph::new(format!(
-            "🔗 Trace Mode ({}) │ Filter: {}\nx/Esc: Exit Trace & Restore │ s: ±5s Context │ E: Full-Trace AI RCA │ y/Y: Copy │ o: Open GCP",
+            "🔗 Trace Mode ({}) │ Filter: {}\nx/Esc: Exit Trace & Restore │ s: Surrounding │ E: Full-Trace AI RCA │ w: Save Report │ y/Y: Copy",
             trace_id, filter_str
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -75,7 +75,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else if let Some(ref filter) = app.filter {
         Paragraph::new(format!(
-            "Filter: {} │ f: Change │ s: ±5s │ c: Radar │ x: Trace │ E: AI RCA │ y/Y: Copy │ o: GCP │ Esc: Clear",
+            "Filter: {} │ f: Change │ -: Mute │ s: ±5s │ c: Radar │ x: Trace │ E: RCA │ w: Report │ Esc: Clear",
             filter
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -86,8 +86,8 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         let hints_text = "\
-j/k: Nav │ s: ±5s Context │ c: Radar │ x: Trace │ e/E: AI Explain/RCA │ y/Y: Copy │ o: Open GCP │ ?: Ask AI │ m: Model
-/: Search │ f: Filter │ g/G: First/Last │ p: Pause │ t: Theme │ Ctrl+j/k: Scroll Detail │ Ctrl+n/p: Scroll AI │ Esc: Clear │ q: Quit";
+j/k: Nav │ Tab/z: Focus/Max │ s: ±5s Context │ c: Radar │ -: Mute │ x: Trace │ e/E: AI Explain/RCA │ w: Incident Report
+/: Search │ f: Filter │ y/Y: Copy │ o: Open GCP │ ?: Ask AI │ m: Model │ p: Pause │ t: Theme │ Esc: Clear │ q: Quit";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()
                 .borders(Borders::ALL)

@@ -52,13 +52,28 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
 
     let line_count = content.lines().count() as u16;
 
+    let detail_focused = app.focused_pane == crate::ui::ActivePane::Detail;
+    let detail_max = app.maximized_pane == Some(crate::ui::ActivePane::Detail);
+    let detail_title = if detail_max {
+        " Detail [⛶ MAXIMIZED — z/Esc: restore │ j/k: scroll │ y: copy │ o: GCP] "
+    } else if detail_focused {
+        " ● Detail (j/k: scroll, z: maximize, y: copy JSON, o: open GCP) "
+    } else {
+        " Detail (Tab: focus, z: maximize, y: copy JSON, o: open GCP, Ctrl+j/k: scroll) "
+    };
+    let detail_border = if detail_focused {
+        colors.border_focused_style()
+    } else {
+        colors.border_style()
+    };
+
     let paragraph = Paragraph::new(content)
         .style(Style::default().fg(colors.fg))
         .block(
             Block::default()
-                .title(" Detail (y: copy JSON, o: open GCP, Ctrl+j/k: scroll) ")
+                .title(detail_title)
                 .borders(Borders::ALL)
-                .border_style(colors.border_focused_style()),
+                .border_style(detail_border),
         )
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0));
@@ -101,10 +116,13 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         let help = [
             "Press 'e' to explain selected log (or selected Error Cluster)",
-            "Press 's' to inspect ±5s surrounding logs on the same instance",
+            "Press 's' to inspect surrounding logs ([ / ] to resize ±5s..±300s)",
             "Press 'c' to toggle Error Fingerprint & Spike Radar",
+            "Press '-' to mute/exclude the selected noisy log pattern",
             "Press 'x' to isolate full request trace across services",
             "Press 'E' (Shift+e) for Full-Trace / Context AI Root Cause Analysis",
+            "Press 'w' to save a Markdown Incident Snapshot Report",
+            "Press 'Tab' to switch pane focus and 'z' to toggle full-screen maximize",
             "Press 'y' / 'Y' to copy Log JSON or AI Analysis to clipboard",
             "Press 'o' to open selected log in Google Cloud Logs Explorer",
             "Press '?' to ask a natural-language question about your logs",
@@ -114,10 +132,29 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         (help, colors.dim_style())
     };
 
-    let ai_title = if app.ai_pii_guard {
-        " AI Analysis 🛡️ PII Guard (Y: copy, Ctrl+n/p: scroll) "
+    let ai_focused = app.focused_pane == crate::ui::ActivePane::Ai;
+    let ai_max = app.maximized_pane == Some(crate::ui::ActivePane::Ai);
+    let ai_title = match (app.ai_pii_guard, ai_max, ai_focused) {
+        (true, true, _) => {
+            " AI Analysis 🛡️ PII Guard [⛶ MAXIMIZED — z/Esc: restore │ j/k: scroll │ Y: copy] "
+        }
+        (false, true, _) => " AI Analysis [⛶ MAXIMIZED — z/Esc: restore │ j/k: scroll │ Y: copy] ",
+        (true, false, true) => {
+            " ● AI Analysis 🛡️ PII Guard (j/k: scroll, z: maximize, Y: copy, w: report) "
+        }
+        (false, false, true) => " ● AI Analysis (j/k: scroll, z: maximize, Y: copy, w: report) ",
+        (true, false, false) => {
+            " AI Analysis 🛡️ PII Guard (Tab: focus, z: max, Y: copy, Ctrl+n/p: scroll) "
+        }
+        (false, false, false) => " AI Analysis (Tab: focus, z: max, Y: copy, Ctrl+n/p: scroll) ",
+    };
+
+    let ai_border_style = if ai_focused {
+        Style::default()
+            .fg(colors.ai_border)
+            .add_modifier(Modifier::BOLD)
     } else {
-        " AI Analysis (Y: copy, Ctrl+n/p: scroll) "
+        Style::default().fg(colors.ai_border)
     };
 
     let paragraph = Paragraph::new(content)
@@ -126,7 +163,7 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .title(ai_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(colors.ai_border)),
+                .border_style(ai_border_style),
         )
         .wrap(Wrap { trim: true })
         .scroll((app.ai_scroll, 0));

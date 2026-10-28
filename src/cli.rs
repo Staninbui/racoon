@@ -91,6 +91,14 @@ pub struct TailArgs {
     /// for example: 30s, 5m, 1h, 2d
     #[arg(long)]
     pub since: Option<String>,
+
+    /// Start timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-2h')
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// End timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-1h')
+    #[arg(long)]
+    pub to: Option<String>,
 }
 
 /// the arguments for download command
@@ -103,6 +111,18 @@ pub struct DownloadArgs {
     /// logging filters
     #[arg(short, long)]
     pub filter: Option<String>,
+
+    /// Relative time range of logs (e.g., 30s, 5m, 1h, 2d)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Start timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-2h')
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// End timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-1h')
+    #[arg(long)]
+    pub to: Option<String>,
 
     /// output file path
     #[arg(short, long, default_value = "logs.json")]
@@ -139,6 +159,14 @@ pub struct QueryArgs {
     /// time range of logs (e.g., 30s, 5m, 1h, 2d)
     #[arg(long)]
     pub since: Option<String>,
+
+    /// Start timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-2h')
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// End timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-1h')
+    #[arg(long)]
+    pub to: Option<String>,
 
     /// log limit
     #[arg(long)]
@@ -182,6 +210,18 @@ pub struct ExportArgs {
     /// GCP Logging filter
     #[arg(short, long)]
     pub filter: Option<String>,
+
+    /// Relative time range of logs (e.g., 30s, 5m, 1h, 2d)
+    #[arg(long)]
+    pub since: Option<String>,
+
+    /// Start timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-2h')
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// End timestamp for log window (RFC3339, 'YYYY-MM-DD HH:MM:SS', or relative like '-1h')
+    #[arg(long)]
+    pub to: Option<String>,
 
     /// Use AI to generate filter from natural language
     #[arg(long)]
@@ -360,5 +400,51 @@ mod tests {
             cli.impersonate_service_account.as_deref(),
             Some("sre-reader@prod-proj.iam.gserviceaccount.com")
         );
+    }
+
+    #[test]
+    fn test_historical_time_range_flags_from_to_since() {
+        let q_cli = Cli::try_parse_from([
+            "racoon",
+            "query",
+            "--project",
+            "prod-proj",
+            "--from",
+            "2026-10-27T14:00:00Z",
+            "--to",
+            "2026-10-27T14:30:00Z",
+        ])
+        .unwrap();
+        match q_cli.command {
+            Commands::Query(args) => {
+                assert_eq!(args.from.as_deref(), Some("2026-10-27T14:00:00Z"));
+                assert_eq!(args.to.as_deref(), Some("2026-10-27T14:30:00Z"));
+            }
+            _ => panic!("Expected Query command"),
+        }
+
+        let exp_cli = Cli::try_parse_from([
+            "racoon",
+            "export",
+            "--project",
+            "prod-proj",
+            "--output",
+            "incident.json",
+            "--since",
+            "2h",
+            "--from",
+            "2026-10-27 14:00:00",
+            "--to",
+            "2026-10-27 15:00:00",
+        ])
+        .unwrap();
+        match exp_cli.command {
+            Commands::Export(args) => {
+                assert_eq!(args.since.as_deref(), Some("2h"));
+                assert_eq!(args.from.as_deref(), Some("2026-10-27 14:00:00"));
+                assert_eq!(args.to.as_deref(), Some("2026-10-27 15:00:00"));
+            }
+            _ => panic!("Expected Export command"),
+        }
     }
 }

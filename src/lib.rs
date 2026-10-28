@@ -46,4 +46,4 @@ pub use error::{RacoonError, Result};
 pub use gcp::{GcpAuth, LogEntry, LogFilter, LogsClient};
 pub use storage::{ExportFormat, ExportOptions, export_logs, import_logs};
 pub use ui::{App, run_app};
-pub use utils::{parse_duration, parse_duration_chrono};
+pub use utils::{parse_duration, parse_duration_chrono, parse_timestamp_input};

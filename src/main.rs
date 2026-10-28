@@ -137,6 +137,40 @@ async fn init_verified_auth(impersonate_sa: Option<String>) -> Result<GcpAuth> {
     Ok(auth)
 }
 
+/// Build a `LogFilter` initialized with `--from` / `--to` bounds or `--since` duration.
+fn build_time_filter(
+    since: Option<&str>,
+    from: Option<&str>,
+    to: Option<&str>,
+    default_since: Option<&str>,
+) -> Result<(LogFilter, chrono::Duration)> {
+    let mut filter = LogFilter::new();
+    let mut lookback = chrono::Duration::hours(1);
+
+    if let Some(from_str) = from {
+        let from_dt = gcp_racoon::parse_timestamp_input(from_str)
+            .map_err(|e| anyhow::anyhow!("Invalid --from: {}", e))?;
+        filter = filter.timestamp_at_or_after(from_dt);
+        let diff = chrono::Utc::now() - from_dt;
+        if diff > chrono::Duration::zero() {
+            lookback = diff;
+        }
+    } else if let Some(since_str) = since.or(default_since) {
+        let duration = gcp_racoon::parse_duration_chrono(since_str)
+            .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
+        filter = filter.since(duration);
+        lookback = duration;
+    }
+
+    if let Some(to_str) = to {
+        let to_dt = gcp_racoon::parse_timestamp_input(to_str)
+            .map_err(|e| anyhow::anyhow!("Invalid --to: {}", e))?;
+        filter = filter.timestamp_before(to_dt);
+    }
+
+    Ok((filter, lookback))
+}
+
 /// handle tail command
 async fn handle_tail(
     args: TailArgs,
@@ -148,11 +182,12 @@ async fn handle_tail(
     // Apply theme
     let theme = Theme::parse(&config.ui.theme);
 
-    // Use config default for since
-    let since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
-
-    let duration = gcp_racoon::parse_duration_chrono(since_str)
-        .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
+    let (mut filter, duration) = build_time_filter(
+        args.since.as_deref(),
+        args.from.as_deref(),
+        args.to.as_deref(),
+        Some(&config.defaults.since),
+    )?;
 
     let auth = init_verified_auth(impersonate_sa).await?;
 
@@ -177,7 +212,6 @@ async fn handle_tail(
 
     let client = LogsClient::new(auth.clone(), project.clone());
 
-    let mut filter = LogFilter::new().since(duration);
     let mut ui_filter_parts: Vec<String> = Vec::new();
 
     if let Some(ref f) = args.filter {
@@ -356,8 +390,17 @@ async fn handle_download(
         println!("📋 Query: {}", query);
         result
     } else {
-        let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
-        export_logs(&client, filter.as_ref(), &args.output, options).await?
+        let (mut filter, _) = build_time_filter(
+            args.since.as_deref(),
+            args.from.as_deref(),
+            args.to.as_deref(),
+            None,
+        )?;
+        if let Some(ref f) = args.filter {
+            filter = filter.raw(f);
+        }
+        let filter_opt = (!filter.is_empty()).then_some(&filter);
+        export_logs(&client, filter_opt, &args.output, options).await?
     };
 
     println!("✅ Downloaded {} logs to {}", result.count, result.path);
@@ -372,9 +415,12 @@ async fn handle_query(
 ) -> Result<()> {
     let project = resolve_project(args.project, config)?;
 
-    let since_str = args.since.as_deref().unwrap_or(&config.defaults.since);
-    let duration = gcp_racoon::parse_duration_chrono(since_str)
-        .map_err(|e| anyhow::anyhow!("Invalid --since: {}", e))?;
+    let (mut filter, _) = build_time_filter(
+        args.since.as_deref(),
+        args.from.as_deref(),
+        args.to.as_deref(),
+        Some(&config.defaults.since),
+    )?;
 
     let limit = args.limit.unwrap_or(config.defaults.limit);
 
@@ -385,9 +431,6 @@ async fn handle_query(
     }
 
     let client = LogsClient::new(auth.clone(), project.clone());
-
-    // Build filter starting with --since duration
-    let mut filter = LogFilter::new().since(duration);
 
     if let Some(ref ai_prompt) = args.ai {
         let gemini = GeminiClient::from_config_with_gcp(config, Some(auth), Some(&project))
@@ -565,13 +608,22 @@ async fn handle_export(
         println!("   Generated filter: {}", query);
         result
     } else {
-        let filter = args.filter.as_ref().map(|f| LogFilter::new().raw(f));
-
-        if let Some(ref f) = filter {
-            println!("   Filter: {}", f.build());
+        let (mut filter, _) = build_time_filter(
+            args.since.as_deref(),
+            args.from.as_deref(),
+            args.to.as_deref(),
+            None,
+        )?;
+        if let Some(ref f) = args.filter {
+            filter = filter.raw(f);
         }
 
-        export_logs(&client, filter.as_ref(), &args.output, options).await?
+        if !filter.is_empty() {
+            println!("   Filter: {}", filter.build());
+        }
+
+        let filter_opt = (!filter.is_empty()).then_some(&filter);
+        export_logs(&client, filter_opt, &args.output, options).await?
     };
 
     println!();

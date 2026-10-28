@@ -172,6 +172,53 @@ pub fn parse_duration_chrono(s: &str) -> std::result::Result<chrono::Duration, S
     Ok(chrono::Duration::seconds(seconds as i64))
 }
 
+/// Parse a user-supplied timestamp or relative time offset into a `chrono::DateTime<Utc>`.
+///
+/// Supported formats:
+/// - RFC 3339 (`"2026-10-27T14:30:00Z"`, `"2026-10-27T14:30:00+09:00"`)
+/// - ISO-8601 date-time (`"2026-10-27 14:30:00"`, `"2026-10-27T14:30:00"`, `"2026-10-27 14:30"` — assumed UTC)
+/// - Date only (`"2026-10-27"` — start of day `00:00:00Z`)
+/// - Relative duration (`"-2h"`, `"2h"`, `"30m"`, `"-45s"`, `"1d"` — subtracted from `Utc::now()`)
+pub fn parse_timestamp_input(s: &str) -> std::result::Result<chrono::DateTime<Utc>, String> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("Timestamp cannot be empty".to_string());
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(trimmed, fmt) {
+            return Ok(naive.and_utc());
+        }
+    }
+
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+        && let Some(naive) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(naive.and_utc());
+    }
+
+    let rel = trimmed.strip_prefix('-').unwrap_or(trimmed);
+    if let Ok(dur) = parse_duration_chrono(rel) {
+        return Ok(Utc::now() - dur);
+    }
+
+    Err(format!(
+        "Invalid timestamp '{}'. Expected RFC3339 (2026-10-27T14:30:00Z), 'YYYY-MM-DD HH:MM:SS', or relative duration (-2h).",
+        trimmed
+    ))
+}
+
 /// Percent-encode a string according to RFC 3986 unreserved character rules.
 pub fn url_encode(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len() * 2);
@@ -347,5 +394,21 @@ mod tests {
     fn test_open_in_browser_rejects_non_http_urls() {
         assert!(open_in_browser("file:///etc/passwd").is_err());
         assert!(open_in_browser("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn test_parse_timestamp_input_rfc3339_iso_and_relative() {
+        let rfc = parse_timestamp_input("2026-10-27T14:30:00Z").unwrap();
+        assert_eq!(rfc.to_rfc3339(), "2026-10-27T14:30:00+00:00");
+
+        let iso_space = parse_timestamp_input("2026-10-27 14:30:00").unwrap();
+        assert_eq!(iso_space.to_rfc3339(), "2026-10-27T14:30:00+00:00");
+
+        let date_only = parse_timestamp_input("2026-10-27").unwrap();
+        assert_eq!(date_only.to_rfc3339(), "2026-10-27T00:00:00+00:00");
+
+        let rel = parse_timestamp_input("-2h").unwrap();
+        let diff_secs = (Utc::now() - rel).num_seconds();
+        assert!((7195..=7205).contains(&diff_secs));
     }
 }

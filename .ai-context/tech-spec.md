@@ -1,70 +1,69 @@
-# Technical Specification: 3-Phase Architecture Refactoring
+# Technical Specification: Phase 1 On-Call UX & High-ROI Features
 
-## Architecture Dependency Graph (Target State)
+## Architecture & Data Flow
 
 ```mermaid
 flowchart TD
-    Main["src/main.rs + src/cli.rs"] --> UI["src/ui/* (Ratatui TUI & Model Selector)"]
-    Main --> Storage["src/storage/* (Export & Import)"]
-    Main --> AI["src/ai/* (LLM Orchestration, Compaction, Redaction)"]
-    Main --> GCP["src/gcp/* (Auth, Logs Client, Entry, Filter, Projects)"]
-    Main --> Config["src/config.rs"]
-
-    UI --> AI
-    UI --> GCP
-    UI --> Config
-    UI --> Utils["src/utils/mod.rs"]
-
-    AI --> GCP
-    AI --> Config
-    AI --> Utils
-
-    Storage --> GCP
-    Storage --> Utils
-
-    GCP --> Utils
+    CLI["src/cli.rs + src/main.rs (--from / --to / --since)"] --> Filter["src/gcp/logs/filter.rs (LogFilter + Negated Fingerprint)"]
+    Entry["src/gcp/logs/entry.rs (Smart Message + HTTP Summary)"] --> TUI["src/ui/app.rs (ActivePane, Maximize, Mute, Window Scaling, Incident Report)"]
+    Config["src/config.rs (history.json Persistence)"] --> TUI
+    TUI --> Widgets["src/ui/widgets/* (Focus Borders & Maximized Layout)"]
 ```
 
-## Phase 1: P0 Bug Fixes & Runtime Hardening
-1. **`StreamHandle` Lifecycle (`src/gcp/logs/client.rs`, `src/ui/app.rs`, `src/ui/mod.rs`, `src/main.rs`)**:
-   - Implement `Drop` for `StreamHandle` (`let _ = self.stop_tx.try_send(());`).
-   - Add `stream_handle: Option<StreamHandle>` field to `App` (with `.with_stream_handle(handle)` builder and `.set_stream_handle(...)`).
-   - In `main.rs` (`handle_tail`), pass the initial `StreamHandle` into `app.with_stream_handle(handle)`.
-   - In `restart_live_stream` (`src/ui/mod.rs`), store `app.stream_handle = Some(new_handle)` when starting a new stream, and set `app.stream_handle = None` when switching to static Surrounding snapshot mode (`s`), ensuring old streams stop immediately and new streams stay alive.
-2. **Quote-Aware & Boolean-Aware Local Filter (`src/gcp/logs/filter.rs`)**:
-   - Implement `tokenize_filter_expr(expr: &str) -> Vec<String>` supporting quoted strings (`"..."`, `'...'`), stripping outer parentheses, ignoring `AND` / `OR` keywords, supporting `NOT` / `-` negation, and supporting `:` substring / `=~` regex operators.
-   - Add helper `is_local_only_filter(expr: &str) -> bool` (detecting `fingerprint:...`) so `restart_live_stream` does not send local-only pseudo-filters to GCP's REST API.
-3. **Radar Drill-Down Filter Restoration (`src/ui/app.rs`, `src/ui/input.rs`)**:
-   - Save `self.previous_filter` when `drill_into_selected_cluster` is invoked, and restore `previous_filter` when pressing `Esc`.
-4. **Respect `ExportOptions.format` (`src/storage/export.rs`, `src/main.rs`)**:
-   - Use `options.format` in `export_logs` instead of unconditionally overwriting it with `ExportFormat::from_path(output_path)`.
-   - In `handle_download`, infer format from `--output` path when constructing `ExportOptions`.
-5. **Default HTTP Timeouts & Regex Pre-compilation (`src/utils/mod.rs`)**:
-   - Add `default_http_client() -> reqwest::Client` with `connect_timeout(10s)` and `timeout(30s)`.
-   - Use `OnceLock<Regex>` in `fix_relative_timestamps`.
+## Detailed Design
 
-## Phase 2: P1 Architectural Decoupling & Deduplication
-1. **Decouple `ai` from `ui`**:
-   - Move `fingerprint_message` to `src/utils/mod.rs` (and re-export from `src/ui/radar.rs` and `src/ui/mod.rs`).
-   - Move `src/ai/selector.rs` implementation to `src/ui/selector.rs` and re-export from `src/ai/selector.rs` / `src/ai/mod.rs`.
-2. **Unify `ProviderKind` & Project ID Parsing (`src/config.rs`, `src/gcp/logs/client.rs`)**:
-   - Use `ProviderKind::try_parse(provider)` in `Config::get_provider_api_key` and `Config::get_provider_base_url`.
-   - Centralize `extract_first_gcp_project_id` in `src/gcp/logs/client.rs` (re-exported in `gcp` and `ai::gemini`).
-   - Remove legacy `fn get_api_key()` from `src/ai/gemini.rs`.
-3. **Unify `RacoonError` (`src/error.rs`)**:
-   - Add `Projects(#[from] ProjectsError)`, `ConfigError(#[from] ConfigError)`, `Export(#[from] ExportError)`, `Import(#[from] ImportError)` variants to `RacoonError`.
+### 1. Smart Log Message & HTTP Summary (`src/gcp/logs/entry.rs`)
+- In `LogEntry::message(&self) -> String`:
+  1. If `self.text_payload` is `Some(text)` and `!text.trim().is_empty()`, return `text.clone()`.
+  2. If `self.json_payload` is `Some(Value::Object(map))`:
+     - Check string fields in order: `["message", "msg", "event", "error", "err", "reason", "description", "detail"]`.
+     - If `"error"` or `"err"` is a nested JSON object containing `"message"` or `"msg"`, extract that string.
+     - If an extracted message is found and `self.http_request` also has a status/method, or if no extracted message is found:
+       - When no extracted message is found in JSON, check `self.http_request` before dumping raw JSON; if `self.http_request` is present and `map` is empty, return the formatted HTTP summary; otherwise dump compact JSON.
+  3. If `self.text_payload` and `self.json_payload` are both `None` (or empty), check `self.http_request`:
+     - Format as `"{method} {status} {url} ({latency})"` (omitting missing optional fields cleanly) via `LogEntry::http_summary(&self) -> Option<String>`.
+  4. Fallback to `"[no message]".to_string()`.
 
-## Phase 3: P2 Modular File Splitting
-1. **`src/gcp/logs/`**:
-   - `mod.rs`: Re-exports & integration tests
-   - `client.rs`: `LogsClient`, `StreamHandle`, `StreamDeduplicator`, `poll_logs`, `parse_resource_names`, `extract_first_gcp_project_id`
-   - `entry.rs`: `LogEntry`, `MonitoredResource`, `HttpRequest`, correlation/surrounding/URL methods
-   - `filter.rs`: `LogFilter`, `matches_local_filter`, `tokenize_filter_expr`, `severity_rank`
-2. **`src/ai/`**:
-   - `cache.rs`: `AiResponseCache`
-   - `providers.rs`: Provider wire structs & HTTP generation methods (`generate_google`, `generate_vertex`, `generate_openai_compatible`, `generate_anthropic`)
-   - `gemini.rs`: `GeminiClient` / `AiClient` high-level API & unit tests
-   - `prompts.rs`: Add `detect_intent_prompt`
-3. **`src/ui/app.rs` & `src/main.rs`**:
-   - Slim down `src/ui/app.rs` by delegating filter logic to `crate::gcp::logs::filter` and unifying context-mode state transitions.
-   - Extract `init_verified_auth` and `resolve_project` helpers in `src/main.rs`.
+### 2. Pane Focus (`Tab`) & Full-Screen Maximize (`z`) (`src/ui/app.rs`, `src/ui/input.rs`, `src/ui/mod.rs`, `src/ui/widgets/`)
+- Define `#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)] pub enum ActivePane { #[default] Logs, Detail, Ai }`.
+- Add `pub focused_pane: ActivePane` and `pub maximized_pane: Option<ActivePane>` to `App`.
+- Key bindings in Normal Mode:
+  - `KeyCode::Tab`: cycles `focused_pane` (`Logs -> Detail -> Ai -> Logs`). If `maximized_pane.is_some()`, updates `maximized_pane = Some(app.focused_pane)` so cycling in maximized mode switches maximized panes smoothly.
+  - `KeyCode::BackTab` (`Shift+Tab`): cycles `focused_pane` in reverse (`Logs -> Ai -> Detail -> Logs`).
+  - `KeyCode::Char('z')`: toggles `maximized_pane` (`if self.maximized_pane.is_some() { self.maximized_pane = None } else { self.maximized_pane = Some(self.focused_pane) }`).
+  - When `focused_pane == ActivePane::Detail`, `j`/`k`/`Down`/`Up`/`PageDown`/`PageUp`/`g`/`G` scroll `detail_scroll`.
+  - When `focused_pane == ActivePane::Ai`, `j`/`k`/`Down`/`Up`/`PageDown`/`PageUp`/`g`/`G` scroll `ai_scroll`.
+  - Pressing `Esc` when `maximized_pane.is_some()` exits maximize mode first (`maximized_pane = None`) without clearing filters.
+- Layout (`render_ui` in `src/ui/mod.rs`):
+  - If `app.maximized_pane == Some(pane)`, split vertically into `[Header(3), MainContent(Min(10)), InputBar(4)]` and render only the maximized pane (`render_log_list`, `render_detail_pane`, or `render_ai_pane`) in `MainContent`.
+
+### 3. Persistent Input History (`src/config.rs`, `src/ui/app.rs`, `src/ui/mod.rs`)
+- Add `Config::history_path() -> PathBuf` returning `~/.config/racoon/history.json`.
+- Add `App::load_history_from_path(&mut self, path: &Path)` and `App::save_history_to_path(&self, path: &Path) -> std::io::Result<()>`.
+- Call `app.load_history_from_path(&Config::history_path())` at the start of `run_app` (if `app.input_history.is_empty()`), and save on `submit_input` / before `run_app` exits.
+
+### 4. 1-Keystroke Noise Exclusion / Pattern Mute (`-` key) (`src/gcp/logs/filter.rs`, `src/ui/app.rs`, `src/ui/input.rs`)
+- Enhance `tokenize_filter_expr` and `matches_single_clause` in `src/gcp/logs/filter.rs` to support `fingerprint:"..."` and negated `-fingerprint:"..."` / `NOT fingerprint:"..."` inside multi-clause filter expressions!
+- Update `is_local_only_filter(filter_expr: &str) -> bool` to return `true` if the expression contains `fingerprint:`.
+- Add `App::mute_selected_pattern(&mut self) -> Result<String, String>`:
+  - Computes the fingerprint of the selected cluster (in Radar view) or selected log entry (`fingerprint_message(&entry.message_preview())`).
+  - Saves `previous_filter` if not already in a temporary overlay.
+  - Appends `-fingerprint:"<fp>"` to the current filter (or sets it if no filter is active).
+  - Filters `self.logs` and rebuilds `self.radar` immediately, returning the muted fingerprint string so a status message `"🔇 Muted pattern: <fp> (Esc to restore)"` is shown.
+
+### 5. Dynamic Surrounding Window (`[` / `]`) & Historical Time-Range CLI (`--from` / `--to` / `--since`)
+- Add `pub surrounding_window_secs: i64` (default `5`) and `pub anchor_entry: Option<LogEntry>` to `App`.
+- When in Surrounding Context mode (`active_surrounding.is_some()`):
+  - Pressing `]` (or `+` / `=`) steps `surrounding_window_secs` up through `[5, 15, 30, 60, 300]` (`App::resize_surrounding_window(true)`).
+  - Pressing `[` steps `surrounding_window_secs` down through `[5, 15, 30, 60, 300]` (`App::resize_surrounding_window(false)`).
+  - Returns `Action::ApplyFilter(Some(new_filter_clause))` and updates the status bar (`"🕵️ Surrounding window updated to ±15s"`).
+- Add `parse_timestamp_input(s: &str) -> Result<DateTime<Utc>, String>` in `src/utils/mod.rs` supporting:
+  - RFC3339 (`2026-10-27T14:00:00Z`, `2026-10-27T14:00:00+09:00`)
+  - `YYYY-MM-DD HH:MM:SS` or `YYYY-MM-DDTHH:MM:SS` (interpreted as UTC)
+  - `YYYY-MM-DD` (start of day UTC `00:00:00Z`)
+  - Relative duration (`30m`, `2h`, `-2h`, `1d` relative to `Utc::now()`)
+- Add `--from` and `--to` to `TailArgs`, `QueryArgs`, `ExportArgs`, and `DownloadArgs` (plus `--since` to `ExportArgs` and `DownloadArgs`).
+
+### 6. 1-Keystroke Incident Snapshot Export (`w` key) (`src/ui/app.rs`, `src/ui/input.rs`, `src/ui/mod.rs`)
+- Add `App::format_incident_report(&self) -> String` and `App::export_incident_report_to_path(&self, path: &Path) -> std::io::Result<()>`.
+- Pressing `w` in Normal Mode triggers `Action::SaveIncidentReport`, writing `incident-<YYYYMMDD-HHMMSS>.md` in the current directory and setting `app.set_status("📝 Saved incident report to ...")`.

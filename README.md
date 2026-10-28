@@ -201,25 +201,30 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `G` / `End` | Go to last log |
 | `PageDown` | Skip 10 logs down |
 | `PageUp` | Skip 10 logs up |
+| `Tab` / `Shift+Tab` | Cycle keyboard focus across **Logs**, **Detail**, and **AI** panes |
+| `z` | Toggle **Full-Screen Maximize** for the currently focused pane (`Esc` to restore) |
 | `c` | Toggle **Error Fingerprint & Spike Radar** (`Enter` to drill into selected cluster) |
-| `s` | Toggle **±5s Surrounding Logs Context** on the same resource instance (`🎯` marks anchor log) |
+| `-` | **Mute / Exclude** the selected noisy log pattern (`-fingerprint:"..."`, `Esc` to restore) |
+| `s` | Toggle **Surrounding Logs Context** on the same resource instance (`🎯` marks anchor log) |
+| `[` / `]` | Shrink / Expand Surrounding Context time window (`±5s` ↔ `±15s` ↔ `±30s` ↔ `±60s` ↔ `±300s`) |
 | `x` | Toggle **Distributed Trace Context** (isolate request by `trace`, `spanId`, or `request_id`) |
 | `e` | Explain selected log (or selected Error Cluster) with AI |
 | `E` (`Shift+e`) | Run **Full-Trace / Surrounding Context AI Root Cause Analysis (RCA)** |
+| `w` | Save a self-contained **Markdown Incident Snapshot** (`incident-<timestamp>.md`) |
 | `y` | Copy selected log JSON (or Error Cluster summary + JSON) to clipboard |
 | `Y` (`Shift+y`) | Copy AI analysis / RCA Markdown report to clipboard |
 | `o` | Open selected log entry in **Google Cloud Logs Explorer** in browser |
 | `?` | Ask AI a question (or set filters in natural language) |
 | `m` | Open interactive AI Provider & Model selector |
-| `/` | Search within logs (`↑` / `↓` in input bar cycles history) |
+| `/` | Search within logs (`↑` / `↓` cycles persistent history at `~/.config/racoon/history.json`) |
 | `n` | Next search match |
 | `N` | Previous search match |
-| `f` | Set GCP filter (`↑` / `↓` in input bar cycles history) |
+| `f` | Set GCP filter (`↑` / `↓` cycles persistent history at `~/.config/racoon/history.json`) |
 | `p` | Pause/resume streaming |
 | `t` | Toggle theme (dark/light) |
 | `Ctrl+j/k` | Scroll detail pane |
 | `Ctrl+n/p` | Scroll AI pane |
-| `Esc` | Exit Radar / exit Trace mode / clear search, AI response, or filter |
+| `Esc` | Restore maximized pane / exit Radar / exit Trace or Mute mode / clear search, AI response, or filter |
 | `q` | Quit |
 
 ### Multi-Provider AI Models & Self-Update
@@ -246,6 +251,9 @@ racoon query --project my-project --since 2h --limit 50
 
 # With filter
 racoon query --project my-project --filter 'resource.type="cloud_run_revision"'
+
+# Historical time-range query (--from / --to)
+racoon query --project my-project --from "2026-10-27 14:00:00" --to "2026-10-27 14:30:00"
 
 # With AI-generated filter
 racoon query --project my-project --ai "all errors from Cloud Run today"

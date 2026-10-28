@@ -66,21 +66,29 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let max_badge = if app.maximized_pane == Some(crate::ui::ActivePane::Logs) {
+        " [⛶ MAXIMIZED — z/Esc: restore]"
+    } else {
+        ""
+    };
+
     let title = if let Some(ref scope) = app.active_surrounding {
         format!(
-            " 🕵️ Surrounding Context: {} ({} logs) — s/Esc: exit, E: Context AI RCA ",
+            " 🕵️ Surrounding Context: {} ({} logs){} — [/]: resize, s/Esc: exit, E: AI RCA ",
             scope,
-            logs.len()
+            logs.len(),
+            max_badge
         )
     } else if let Some(ref trace_id) = app.active_trace {
         format!(
-            " 🔗 Trace Context: {} ({} logs) — x/Esc: exit, E: Full-Trace AI RCA ",
+            " 🔗 Trace Context: {} ({} logs){} — x/Esc: exit, E: Full-Trace AI RCA ",
             trace_id,
-            logs.len()
+            logs.len(),
+            max_badge
         )
     } else if let Some(ref query) = app.search_query {
         format!(
-            " Logs ({}) - Search: '{}' [{}/{}], n/N: next/prev, Esc: clear ",
+            " Logs ({}) - Search: '{}' [{}/{}]{}, n/N: next/prev, Esc: clear ",
             logs.len(),
             query,
             if app.search_matches.is_empty() {
@@ -88,12 +96,14 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 app.search_match_index + 1
             },
-            app.search_matches.len()
+            app.search_matches.len(),
+            max_badge
         )
     } else {
         format!(
-            " Logs ({}) — 'c': Error Spike Radar │ 's': ±5s Surrounding Context ",
-            logs.len()
+            " Logs ({}){} — 'c': Spike Radar │ 's': ±5s Context │ '-': Mute │ 'z': Maximize ",
+            logs.len(),
+            max_badge
         )
     };
 
@@ -108,8 +118,10 @@ pub fn render_log_list(frame: &mut Frame, app: &App, area: Rect) {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
-    } else {
+    } else if app.focused_pane == crate::ui::ActivePane::Logs {
         colors.border_focused_style()
+    } else {
+        colors.border_style()
     };
 
     let list = List::new(items)

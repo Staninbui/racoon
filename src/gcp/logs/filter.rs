@@ -90,10 +90,10 @@ impl LogFilter {
     }
 }
 
-/// Return `true` if `filter_expr` is a client-side pseudo-filter (such as `fingerprint:...`)
+/// Return `true` if `filter_expr` contains a client-side pseudo-filter (such as `fingerprint:...`)
 /// that should NOT be sent to the remote GCP Cloud Logging REST API.
 pub fn is_local_only_filter(filter_expr: &str) -> bool {
-    filter_expr.trim().starts_with("fingerprint:")
+    filter_expr.contains("fingerprint:")
 }
 
 /// Tokenize a GCP filter expression while preserving spaces inside `"..."` or `'...'` quotes
@@ -147,7 +147,10 @@ pub fn matches_local_filter(entry: &LogEntry, filter_expr: &str) -> bool {
         return true;
     }
 
-    if let Some(target_fp) = expr.strip_prefix("fingerprint:") {
+    if let Some(target_fp) = expr.strip_prefix("fingerprint:")
+        && !target_fp.trim_start().starts_with('"')
+        && !target_fp.trim_start().starts_with('\'')
+    {
         return fingerprint_message(&entry.message_preview()) == target_fp.trim();
     }
 
@@ -187,6 +190,10 @@ fn strip_quotes(s: &str) -> &str {
 }
 
 fn matches_single_clause(entry: &LogEntry, token: &str) -> bool {
+    if let Some(fp_raw) = token.strip_prefix("fingerprint:") {
+        let target_fp = strip_quotes(fp_raw);
+        return fingerprint_message(&entry.message_preview()) == target_fp;
+    }
     let token_upper = token.to_uppercase();
     if let Some(target_sev) = token_upper.strip_prefix("SEVERITY>=") {
         let target_sev = strip_quotes(target_sev);

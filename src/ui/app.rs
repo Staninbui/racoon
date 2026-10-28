@@ -13,6 +13,15 @@ pub use crate::gcp::logs::{matches_local_filter, severity_rank};
 /// Default maximum number of logs to keep in memory.
 const DEFAULT_MAX_LOGS: usize = 100;
 
+/// Which TUI pane currently holds keyboard focus (`Tab` / `Shift+Tab` to cycle, `z` to maximize).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivePane {
+    #[default]
+    Logs,
+    Detail,
+    Ai,
+}
+
 /// The main application state.
 #[derive(Debug)]
 pub struct App {
@@ -67,8 +76,23 @@ pub struct App {
     /// Deduplication key of the anchor log entry around which Surrounding Logs mode was opened.
     pub anchor_log_key: Option<String>,
 
+    /// Anchor log entry around which Surrounding Logs mode (`s` key) was opened.
+    pub anchor_entry: Option<LogEntry>,
+
+    /// Half-window radius in seconds (`±N`s) for Surrounding Logs mode (`[` / `]` to resize).
+    pub surrounding_window_secs: i64,
+
     /// Whether the view is currently drilled down into an Error Cluster from Spike Radar.
     pub active_cluster_drilldown: bool,
+
+    /// Whether one or more noisy patterns have been muted via `-` key.
+    pub active_pattern_mute: bool,
+
+    /// Currently focused pane (`Logs`, `Detail`, or `Ai`).
+    pub focused_pane: ActivePane,
+
+    /// Pane currently maximized to full-screen (`z` key), if any.
+    pub maximized_pane: Option<ActivePane>,
 
     /// Saved filter prior to entering Trace, Surrounding, or Radar cluster drill-down mode, restored on exit.
     pub previous_filter: Option<String>,
@@ -153,7 +177,12 @@ impl App {
             active_trace: None,
             active_surrounding: None,
             anchor_log_key: None,
+            anchor_entry: None,
+            surrounding_window_secs: 5,
             active_cluster_drilldown: false,
+            active_pattern_mute: false,
+            focused_pane: ActivePane::Logs,
+            maximized_pane: None,
             previous_filter: None,
             stream_handle: None,
             ai_available: false,
@@ -238,15 +267,52 @@ impl App {
         }
     }
 
+    fn has_active_overlay(&self) -> bool {
+        self.active_surrounding.is_some()
+            || self.active_trace.is_some()
+            || self.active_cluster_drilldown
+            || self.active_pattern_mute
+    }
+
+    /// Cycle keyboard focus forward across panes (`Logs -> Detail -> Ai -> Logs`).
+    pub fn focus_next_pane(&mut self) {
+        self.focused_pane = match self.focused_pane {
+            ActivePane::Logs => ActivePane::Detail,
+            ActivePane::Detail => ActivePane::Ai,
+            ActivePane::Ai => ActivePane::Logs,
+        };
+        if self.maximized_pane.is_some() {
+            self.maximized_pane = Some(self.focused_pane);
+        }
+    }
+
+    /// Cycle keyboard focus backward across panes (`Logs -> Ai -> Detail -> Logs`).
+    pub fn focus_prev_pane(&mut self) {
+        self.focused_pane = match self.focused_pane {
+            ActivePane::Logs => ActivePane::Ai,
+            ActivePane::Detail => ActivePane::Logs,
+            ActivePane::Ai => ActivePane::Detail,
+        };
+        if self.maximized_pane.is_some() {
+            self.maximized_pane = Some(self.focused_pane);
+        }
+    }
+
+    /// Toggle full-screen maximize for the currently focused pane (`z` key).
+    pub fn toggle_maximize_pane(&mut self) {
+        if self.maximized_pane.is_some() {
+            self.maximized_pane = None;
+        } else {
+            self.maximized_pane = Some(self.focused_pane);
+        }
+    }
+
     /// Drill down into the currently selected `ErrorCluster` in Radar view (`Enter` key):
     /// switches back to the Log List filtered to entries matching that cluster's fingerprint.
     pub fn drill_into_selected_cluster(&mut self) -> Option<String> {
         let cluster = self.selected_cluster()?.clone();
         self.show_radar = false;
-        if self.active_surrounding.is_none()
-            && self.active_trace.is_none()
-            && !self.active_cluster_drilldown
-        {
+        if !self.has_active_overlay() {
             self.previous_filter = self.filter.clone();
         }
         self.active_cluster_drilldown = true;
@@ -262,6 +328,41 @@ impl App {
         let restored = self.previous_filter.take();
         self.set_filter(restored.clone());
         restored
+    }
+
+    /// Mute/exclude the pattern (normalized fingerprint) of the currently selected log entry
+    /// or Error Spike Radar cluster (`-` key). Restored on `Esc`.
+    pub fn mute_selected_pattern(&mut self) -> Result<String, String> {
+        let fp = if let Some(cluster) = self.selected_cluster() {
+            cluster.fingerprint.clone()
+        } else if let Some(entry) = self.selected_log() {
+            crate::utils::fingerprint_message(&entry.message_preview())
+        } else {
+            return Err("No log entry or error cluster selected to mute.".to_string());
+        };
+
+        if !self.has_active_overlay() {
+            self.previous_filter = self.filter.clone();
+        }
+        self.active_pattern_mute = true;
+        let escaped_fp = fp.replace('"', "'");
+        let mute_clause = format!("-fingerprint:\"{}\"", escaped_fp);
+        let new_filter = match self
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(existing) => format!("{} {}", existing, mute_clause),
+            None => mute_clause,
+        };
+        self.set_filter(Some(new_filter));
+        if self.radar_selected_index >= self.radar.clusters.len() && !self.radar.clusters.is_empty()
+        {
+            self.radar_selected_index = self.radar.clusters.len() - 1;
+        }
+        self.set_status(format!("🔇 Muted pattern: {} (Esc to restore)", fp));
+        Ok(fp)
     }
 
     /// Toggle Distributed Trace Context mode (`x` key).
@@ -280,15 +381,14 @@ impl App {
         })?;
 
         self.show_radar = false;
-        if self.active_surrounding.is_none()
-            && self.active_trace.is_none()
-            && !self.active_cluster_drilldown
-        {
+        if !self.has_active_overlay() {
             self.previous_filter = self.filter.clone();
         }
         self.active_surrounding = None;
         self.anchor_log_key = None;
+        self.anchor_entry = None;
         self.active_cluster_drilldown = false;
+        self.active_pattern_mute = false;
         self.active_trace = Some(short_id);
         self.set_filter(Some(filter_clause.clone()));
         Ok(Some(filter_clause))
@@ -314,48 +414,91 @@ impl App {
             .cloned()
             .ok_or_else(|| "No log entry selected.".to_string())?;
 
-        let (filter_clause, badge) = entry.surrounding_context(5).ok_or_else(|| {
-            "Selected log has no timestamp for ±5s surrounding context.".to_string()
-        })?;
+        self.surrounding_window_secs = 5;
+        let (filter_clause, badge) = entry
+            .surrounding_context(self.surrounding_window_secs)
+            .ok_or_else(|| {
+                "Selected log has no timestamp for ±5s surrounding context.".to_string()
+            })?;
 
         let anchor_key = entry.dedup_key();
 
         self.show_radar = false;
-        if self.active_surrounding.is_none()
-            && self.active_trace.is_none()
-            && !self.active_cluster_drilldown
-        {
+        if !self.has_active_overlay() {
             self.previous_filter = self.filter.clone();
         }
         self.active_trace = None;
         self.active_cluster_drilldown = false;
+        self.active_pattern_mute = false;
         self.active_surrounding = Some(badge);
         self.anchor_log_key = Some(anchor_key);
+        self.anchor_entry = Some(entry);
         self.set_filter(Some(filter_clause.clone()));
         self.select_anchor_log();
         Ok(Some(filter_clause))
+    }
+
+    /// Expand (`expand = true`, `]` key) or shrink (`expand = false`, `[` key) the Surrounding Context
+    /// time window across `[5s, 15s, 30s, 60s, 300s]`.
+    pub fn resize_surrounding_window(&mut self, expand: bool) -> Result<String, String> {
+        const STEPS: &[i64] = &[5, 15, 30, 60, 300];
+        if self.active_surrounding.is_none() {
+            return Err("Surrounding context mode is not active (press 's' first).".to_string());
+        }
+        let anchor = self
+            .anchor_entry
+            .clone()
+            .ok_or_else(|| "No anchor log entry available for surrounding context.".to_string())?;
+
+        let current_idx = STEPS
+            .iter()
+            .position(|&s| s >= self.surrounding_window_secs)
+            .unwrap_or(0);
+        let new_idx = if expand {
+            (current_idx + 1).min(STEPS.len() - 1)
+        } else {
+            current_idx.saturating_sub(1)
+        };
+        self.surrounding_window_secs = STEPS[new_idx];
+
+        let (filter_clause, badge) = anchor
+            .surrounding_context(self.surrounding_window_secs)
+            .ok_or_else(|| "Anchor log has no timestamp.".to_string())?;
+        self.active_surrounding = Some(badge.clone());
+        self.set_filter(Some(filter_clause.clone()));
+        self.select_anchor_log();
+        self.set_status(format!(
+            "🕵️ Surrounding window updated: {} ([ / ] to resize)",
+            badge
+        ));
+        Ok(filter_clause)
     }
 
     /// Exit Surrounding Logs Context mode and restore the previous filter.
     pub fn exit_surrounding_context(&mut self) -> Option<String> {
         self.active_surrounding = None;
         self.anchor_log_key = None;
+        self.anchor_entry = None;
+        self.surrounding_window_secs = 5;
         let restored = self.previous_filter.take();
         self.set_filter(restored.clone());
         restored
     }
 
-    /// Clear all temporary context overlay states (Trace, Surrounding, Radar cluster drill-down)
+    /// Clear all temporary context overlay states (Trace, Surrounding, Radar cluster drill-down, Mute)
     /// when a brand-new user or AI filter is explicitly applied.
     pub fn clear_context_overlay(&mut self) {
         self.active_trace = None;
         self.active_surrounding = None;
         self.anchor_log_key = None;
+        self.anchor_entry = None;
+        self.surrounding_window_secs = 5;
         self.active_cluster_drilldown = false;
+        self.active_pattern_mute = false;
         self.previous_filter = None;
     }
 
-    /// If any temporary context overlay (Surrounding, Trace, or Radar drill-down) is active,
+    /// If any temporary context overlay (Surrounding, Trace, Radar drill-down, or Pattern Mute) is active,
     /// exit it and restore `previous_filter`, returning `Some(restored_filter)`.
     pub fn exit_active_overlay(&mut self) -> Option<Option<String>> {
         if self.active_surrounding.is_some() {
@@ -364,6 +507,11 @@ impl App {
             Some(self.exit_trace_context())
         } else if self.active_cluster_drilldown {
             Some(self.exit_cluster_drilldown())
+        } else if self.active_pattern_mute {
+            self.active_pattern_mute = false;
+            let restored = self.previous_filter.take();
+            self.set_filter(restored.clone());
+            Some(restored)
         } else {
             None
         }
@@ -710,6 +858,131 @@ impl App {
             "Cannot determine GCP project ID for Console URL (offline log has no project metadata)."
                 .to_string()
         })
+    }
+
+    /// Load `input_history` from a JSON file on disk (ignoring missing or malformed files).
+    pub fn load_history_from_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(path)?;
+        if let Ok(entries) = serde_json::from_str::<Vec<String>>(&content) {
+            self.input_history = entries
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .rev()
+                .take(100)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+        }
+        Ok(())
+    }
+
+    /// Save `input_history` to a JSON file on disk (creating parent directories if needed).
+    pub fn save_history_to_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json =
+            serde_json::to_string_pretty(&self.input_history).map_err(std::io::Error::other)?;
+        std::fs::write(path, json)
+    }
+
+    /// Format a self-contained Markdown incident report capturing the current TUI context,
+    /// Error Spike Radar clusters, AI Root Cause Analysis, and log timeline (`w` key).
+    pub fn format_incident_report(&self) -> String {
+        let now_str = chrono::Utc::now()
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string();
+        let filter_str = self.filter.as_deref().unwrap_or("(none)");
+        let mode_str = if let Some(ref scope) = self.active_surrounding {
+            format!("Surrounding Context ({})", scope)
+        } else if let Some(ref trace) = self.active_trace {
+            format!("Distributed Trace ({})", trace)
+        } else if self.offline_logs.is_some() {
+            "Offline File".to_string()
+        } else if self.is_streaming {
+            "Live Stream".to_string()
+        } else {
+            "Paused Stream".to_string()
+        };
+
+        let mut out = String::with_capacity(4096);
+        out.push_str("# 🦝 Racoon Incident Snapshot\n\n");
+        out.push_str(&format!("- **Generated At**: `{}`\n", now_str));
+        out.push_str(&format!("- **Project / Source**: `{}`\n", self.project));
+        out.push_str(&format!("- **Active Mode**: `{}`\n", mode_str));
+        out.push_str(&format!("- **Active Filter**: `{}`\n", filter_str));
+        out.push_str(&format!("- **Buffered Logs**: `{}`\n", self.logs.len()));
+        out.push_str(&format!("- **AI Model**: `{}`\n\n", self.ai_model_label));
+
+        out.push_str("## 🚨 Error Fingerprint & Spike Radar\n\n");
+        if self.radar.clusters.is_empty() {
+            out.push_str("_No WARNING/ERROR/CRITICAL patterns detected in current buffer._\n\n");
+        } else {
+            out.push_str(&format!(
+                "- **Total Error/Warning Logs**: `{}` │ **Velocity Sparkline**: `{}`\n\n",
+                self.radar.total_error_logs,
+                self.radar.sparkline()
+            ));
+            for cluster in self.radar.clusters.iter().take(10) {
+                let badge = if cluster.is_spike { "🚨" } else { "🔥" };
+                out.push_str(&format!(
+                    "- {} **[x{}]** `[{}]` `{}` _(first: {}, last: {})_\n",
+                    badge,
+                    cluster.count,
+                    cluster.severity,
+                    cluster.fingerprint,
+                    cluster.first_seen,
+                    cluster.last_seen
+                ));
+            }
+            out.push('\n');
+        }
+
+        if let Some(ref ai_text) = self.ai_response {
+            out.push_str("## 🤖 AI Root Cause Analysis\n\n");
+            out.push_str(ai_text.trim());
+            out.push_str("\n\n");
+        }
+
+        if let Some(selected) = self.selected_log() {
+            out.push_str("## 🎯 Selected Log Entry\n\n```json\n");
+            if let Ok(pretty) = serde_json::to_string_pretty(selected) {
+                out.push_str(&pretty);
+            }
+            out.push_str("\n```\n\n");
+        }
+
+        out.push_str("## 📋 Log Timeline (Recent Entries)\n\n```text\n");
+        for entry in self.logs.iter().take(30) {
+            let mark = if self.active_surrounding.is_some() && self.is_anchor_log(entry) {
+                "🎯 "
+            } else {
+                "   "
+            };
+            out.push_str(&format!("{}{}\n", mark, entry.to_line()));
+        }
+        out.push_str("```\n");
+
+        out
+    }
+
+    /// Write the formatted Markdown incident report to `path`, returning the number of bytes written.
+    pub fn save_incident_report_to_path(&self, path: &std::path::Path) -> std::io::Result<usize> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let report = self.format_incident_report();
+        let bytes = report.len();
+        std::fs::write(path, report)?;
+        Ok(bytes)
     }
 
     pub fn search(&mut self, query: &str) {
@@ -1271,5 +1544,162 @@ mod tests {
             offline_multi.logs[0].short_project_badge().as_deref(),
             Some("prod-payment")
         );
+    }
+
+    #[test]
+    fn test_app_pane_focus_cycle_and_maximize_toggle() {
+        let mut app = App::new("test".to_string());
+        assert_eq!(app.focused_pane, ActivePane::Logs);
+        assert!(app.maximized_pane.is_none());
+
+        app.focus_next_pane();
+        assert_eq!(app.focused_pane, ActivePane::Detail);
+
+        app.toggle_maximize_pane();
+        assert_eq!(app.maximized_pane, Some(ActivePane::Detail));
+
+        // Cycling focus while maximized switches the maximized pane as well
+        app.focus_next_pane();
+        assert_eq!(app.focused_pane, ActivePane::Ai);
+        assert_eq!(app.maximized_pane, Some(ActivePane::Ai));
+
+        app.toggle_maximize_pane();
+        assert!(app.maximized_pane.is_none());
+    }
+
+    #[test]
+    fn test_app_persistent_input_history_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let history_file = dir.path().join("history.json");
+
+        let mut app = App::new("test".to_string());
+        app.enter_input_mode(InputMode::Filter);
+        app.input_buffer = "severity>=ERROR".to_string();
+        app.submit_input();
+
+        app.enter_input_mode(InputMode::Search);
+        app.input_buffer = "timeout".to_string();
+        app.submit_input();
+
+        app.save_history_to_file(&history_file).unwrap();
+
+        let mut reloaded_app = App::new("test".to_string());
+        reloaded_app.load_history_from_file(&history_file).unwrap();
+        assert_eq!(
+            reloaded_app.input_history,
+            vec!["severity>=ERROR".to_string(), "timeout".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_app_mute_selected_pattern_and_restore_on_esc() {
+        let entries = vec![
+            LogEntry {
+                severity: Some("WARNING".to_string()),
+                text_payload: Some("GET /healthz 200 OK in 2ms".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("WARNING".to_string()),
+                text_payload: Some("GET /healthz 200 OK in 4ms".to_string()),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("DB connection pool exhausted".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
+        assert_eq!(app.logs.len(), 3);
+
+        // Mute the noisy healthz pattern at index 0
+        let muted_fp = app.mute_selected_pattern().unwrap();
+        assert_eq!(muted_fp, "GET /healthz <N> OK in <N>ms");
+        assert_eq!(app.logs.len(), 1);
+        assert_eq!(app.logs[0].message(), "DB connection pool exhausted");
+
+        // Exiting overlay restores all 3 logs
+        let restored = app.exit_active_overlay();
+        assert_eq!(restored, Some(None));
+        assert_eq!(app.logs.len(), 3);
+    }
+
+    #[test]
+    fn test_app_dynamic_surrounding_window_resize() {
+        use crate::gcp::logs::MonitoredResource;
+        use chrono::{DateTime, Utc};
+
+        let ts = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let pod_res = || {
+            let mut m = std::collections::HashMap::new();
+            m.insert("pod_name".to_string(), "pod-a".to_string());
+            Some(MonitoredResource {
+                r#type: "k8s_container".to_string(),
+                labels: Some(m),
+            })
+        };
+
+        let entries = vec![
+            // 12 seconds before anchor (outside ±5s, but inside ±15s!)
+            LogEntry {
+                insert_id: Some("e-12s-before".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:08Z")),
+                severity: Some("INFO".to_string()),
+                resource: pod_res(),
+                text_payload: Some("Upstream slow response".to_string()),
+                ..Default::default()
+            },
+            // Anchor error at 13:00:20Z
+            LogEntry {
+                insert_id: Some("e-anchor".to_string()),
+                timestamp: Some(ts("2026-10-27T13:00:20Z")),
+                severity: Some("ERROR".to_string()),
+                resource: pod_res(),
+                text_payload: Some("Crash".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new("offline.json".to_string()).with_offline_logs(entries);
+        app.selected_index = 1; // select `e-anchor`
+
+        app.toggle_surrounding_context().unwrap();
+        assert_eq!(app.surrounding_window_secs, 5);
+        assert_eq!(app.logs.len(), 1); // only `e-anchor` is within ±5s
+
+        // Expand window (`]`) from ±5s -> ±15s
+        let new_filter = app.resize_surrounding_window(true).unwrap();
+        assert_eq!(app.surrounding_window_secs, 15);
+        assert!(new_filter.contains("2026-10-27T13:00:05+00:00"));
+        assert_eq!(app.logs.len(), 2); // now `e-12s-before` is included!
+        assert_eq!(app.selected_index, 1); // anchor log stays selected
+    }
+
+    #[test]
+    fn test_app_format_and_save_incident_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("incident-test.md");
+
+        let mut app = App::new("prod-checkout".to_string()).with_offline_logs(vec![LogEntry {
+            insert_id: Some("err-99".to_string()),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Payment gateway 504 timeout".to_string()),
+            ..Default::default()
+        }]);
+        app.set_filter(Some("severity>=ERROR".to_string()));
+        app.set_ai_response("### Root Cause\nDownstream Stripe webhook timed out.".to_string());
+
+        let markdown = app.format_incident_report();
+        assert!(markdown.contains("# 🦝 Racoon Incident Snapshot"));
+        assert!(markdown.contains("prod-checkout"));
+        assert!(markdown.contains("severity>=ERROR"));
+        assert!(markdown.contains("Downstream Stripe webhook timed out."));
+        assert!(markdown.contains("Payment gateway 504 timeout"));
+
+        let bytes = app.save_incident_report_to_path(&report_path).unwrap();
+        assert!(bytes > 100);
+        assert!(report_path.exists());
     }
 }

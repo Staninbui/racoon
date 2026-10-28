@@ -10,7 +10,7 @@ pub mod selector;
 pub mod theme;
 pub mod widgets;
 
-pub use app::{App, InputMode};
+pub use app::{ActivePane, App, InputMode};
 pub use radar::{ErrorCluster, SpikeRadar, fingerprint_message};
 pub use selector::{ModelSelectorState, run_model_selector, select_with_terminal};
 
@@ -249,6 +249,10 @@ pub async fn run_app(
         }
     });
 
+    if app.input_history.is_empty() {
+        let _ = app.load_history_from_file(&Config::history_path());
+    }
+
     let mut terminal = ratatui::init();
     terminal.clear()?;
 
@@ -263,6 +267,7 @@ pub async fn run_app(
     .await;
 
     ratatui::restore();
+    let _ = app.save_history_to_file(&Config::history_path());
 
     result
 }
@@ -469,6 +474,22 @@ async fn run_event_loop(
                         app.set_error(format!("Failed to open browser: {}", e));
                     }
                 },
+                input::Action::SaveIncidentReport => {
+                    let filename =
+                        format!("incident-{}.md", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+                    let path = std::path::PathBuf::from(&filename);
+                    match app.save_incident_report_to_path(&path) {
+                        Ok(bytes) => {
+                            app.set_status(format!(
+                                "📝 Saved incident snapshot to {} ({} bytes)",
+                                filename, bytes
+                            ));
+                        }
+                        Err(e) => {
+                            app.set_error(format!("Failed to save incident report: {}", e));
+                        }
+                    }
+                }
                 input::Action::GenerateQuery(_) | input::Action::None => {}
             }
         }
@@ -521,6 +542,26 @@ async fn run_event_loop(
 /// Render the complete UI.
 fn render_ui(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    if let Some(max_pane) = app.maximized_pane {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(4),
+            ])
+            .split(area);
+
+        render_header(frame, app, chunks[0]);
+        match max_pane {
+            ActivePane::Logs => render_log_list(frame, app, chunks[1]),
+            ActivePane::Detail => render_detail_pane(frame, app, chunks[1]),
+            ActivePane::Ai => render_ai_pane(frame, app, chunks[1]),
+        }
+        render_input_bar(frame, app, chunks[2]);
+        return;
+    }
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
