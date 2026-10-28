@@ -3,19 +3,52 @@
 //! Handles communication with multiple LLM providers for AI-powered
 //! log analysis and query generation.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::debug;
 
+use super::compact::{compact_log_for_ai, compact_logs_for_rca, try_local_intent};
 use super::models::ProviderKind;
 use super::prompts;
 use super::redact::{RedactionStats, redact_sensitive_text};
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
+use crate::ui::fingerprint_message;
 use crate::utils::sanitize_query;
 
 /// Default model name (Google Gemini).
 const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+
+/// Maximum entries retained in the client-side AI response LRU cache.
+const AI_CACHE_CAPACITY: usize = 64;
+
+/// Bounded in-memory LRU cache mapping normalized prompt/fingerprint keys to AI responses.
+#[derive(Debug, Default)]
+struct AiResponseCache {
+    entries: VecDeque<(String, String)>,
+}
+
+impl AiResponseCache {
+    fn get(&mut self, key: &str) -> Option<String> {
+        let pos = self.entries.iter().position(|(k, _)| k == key)?;
+        let (k, v) = self.entries.remove(pos)?;
+        self.entries.push_back((k, v.clone()));
+        Some(v)
+    }
+
+    fn insert(&mut self, key: String, value: String) {
+        if let Some(pos) = self.entries.iter().position(|(k, _)| k == &key) {
+            self.entries.remove(pos);
+        }
+        self.entries.push_back((key, value));
+        while self.entries.len() > AI_CACHE_CAPACITY {
+            self.entries.pop_front();
+        }
+    }
+}
 
 /// Errors that can occur during AI operations.
 #[derive(Error, Debug)]
@@ -67,8 +100,11 @@ pub struct QuestionAnswer {
 /// Types of user intents detected from input.
 #[derive(Debug, Clone)]
 pub enum UserIntent {
-    /// User is asking a question about logs.
-    Question { question: String },
+    /// User is asking a question about logs (with an optional pre-generated GCP query to avoid a second LLM call).
+    Question {
+        question: String,
+        gcp_query: Option<String>,
+    },
     /// User wants to set a filter.
     SetFilter { filter: String, description: String },
     /// User wants to generate a query (for viewing).
@@ -92,6 +128,8 @@ pub struct GeminiClient {
     base_url: String,
     /// Whether to scrub PII and secrets locally before sending prompts to the LLM
     redact_pii: bool,
+    /// Client-side LRU cache for instant 0-token repeat explanations & RCAs
+    cache: Arc<Mutex<AiResponseCache>>,
 }
 
 /// Alias for `GeminiClient` representing the multi-provider AI client.
@@ -125,6 +163,7 @@ impl GeminiClient {
             model,
             base_url: resolved_base_url,
             redact_pii: true,
+            cache: Arc::new(Mutex::new(AiResponseCache::default())),
         }
     }
 
@@ -147,6 +186,18 @@ impl GeminiClient {
     /// Return the active model identifier.
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Look up a cached AI response by key (`0` tokens used on hit).
+    pub fn get_cached_response(&self, key: &str) -> Option<String> {
+        self.cache.lock().ok()?.get(key)
+    }
+
+    /// Insert a response into the client-side LRU cache.
+    pub fn put_cached_response(&self, key: String, value: String) {
+        if let Ok(mut guard) = self.cache.lock() {
+            guard.insert(key, value);
+        }
     }
 
     /// Create a client from environment variable or config file.
@@ -182,15 +233,31 @@ impl GeminiClient {
         config.get_api_key().is_some() || get_api_key().is_some()
     }
 
-    /// Explain a log entry using AI (applying Pre-AI PII/Secret redaction when enabled).
+    /// Explain a log entry using AI (with semantic compaction, PII redaction, and fingerprint LRU cache).
     pub async fn explain_log(&self, entry: &LogEntry) -> Result<String, AiError> {
-        let raw_json =
-            serde_json::to_string_pretty(entry).map_err(|e| AiError::ParseError(e.to_string()))?;
+        let pattern_fp = fingerprint_message(&entry.message());
+        let cache_key = format!(
+            "explain:{}:{}:{}:{}:{}",
+            self.provider.id(),
+            self.model,
+            entry.severity_or_default(),
+            entry.resource_type().unwrap_or("-"),
+            pattern_fp
+        );
 
-        let (payload_json, stats) = if self.redact_pii {
-            redact_sensitive_text(&raw_json)
+        if let Some(cached) = self.get_cached_response(&cache_key) {
+            return Ok(format!(
+                "⚡ Cached Analysis (0 tokens used │ matched error pattern)\n\n{}",
+                cached
+            ));
+        }
+
+        let (compacted_json, compaction_stats) = compact_log_for_ai(entry);
+
+        let (payload_json, redact_stats) = if self.redact_pii {
+            redact_sensitive_text(&compacted_json)
         } else {
-            (raw_json, RedactionStats::default())
+            (compacted_json, RedactionStats::default())
         };
 
         let prompt = prompts::explain_log_prompt(&payload_json);
@@ -198,41 +265,52 @@ impl GeminiClient {
         debug!(
             provider = self.provider.id(),
             model = %self.model,
-            redactions = stats.total_redactions,
+            raw_tokens = compaction_stats.raw_tokens,
+            compacted_tokens = compaction_stats.compacted_tokens,
+            redactions = redact_stats.total_redactions,
             "Explaining log entry: {}",
             entry.insert_id.as_deref().unwrap_or("unknown")
         );
 
-        let explanation = self.generate(&prompt).await?;
-        if let Some(banner) = stats.banner() {
-            Ok(format!("{}\n\n{}", banner, explanation))
-        } else {
-            Ok(explanation)
+        let explanation = self.generate_with_max_tokens(&prompt, 450).await?;
+
+        let mut banners = Vec::new();
+        if let Some(b) = compaction_stats.badge() {
+            banners.push(b);
         }
+        if let Some(b) = redact_stats.banner() {
+            banners.push(b);
+        }
+
+        let formatted = if banners.is_empty() {
+            explanation
+        } else {
+            format!("{}\n\n{}", banners.join("\n"), explanation)
+        };
+
+        self.put_cached_response(cache_key, formatted.clone());
+        Ok(formatted)
     }
 
-    /// Detect user intent from natural language input.
+    /// Detect user intent from natural language input (with 0-token local fast-path and single-call query synthesis).
     pub async fn detect_intent(&self, input: &str) -> Result<UserIntent, AiError> {
+        if let Some(local_intent) = try_local_intent(input) {
+            return Ok(local_intent);
+        }
+
         let prompt = format!(
-            r#"Analyze this user input and determine the intent:
-
+            r#"Classify user input for GCP Cloud Logging and synthesize a GCP filter query if applicable.
 Input: "{input}"
-
-Possible intents:
-1. QUESTION - User is asking about logs (e.g., "Are there any errors?", "What happened at 14:00?")
-2. SET_FILTER - User wants to change the current filter (e.g., "设置过滤条件为INFO以上", "only show errors", "filter by severity warning")
-3. GENERATE_QUERY - User wants to see a query (e.g., "show me the query for...", "what's the query for...")
-
-Response format (JSON only, no explanation):
-{{"intent": "QUESTION" | "SET_FILTER" | "GENERATE_QUERY", "gcp_query": "<query if applicable>", "description": "<brief description>"}}
-
-Response:"#,
-            input = input
+Intents:
+- QUESTION: asking about logs (include "gcp_query" to fetch relevant logs)
+- SET_FILTER: changing active filter
+- GENERATE_QUERY: requesting query syntax
+Return JSON only:
+{{"intent":"QUESTION"|"SET_FILTER"|"GENERATE_QUERY","gcp_query":"<valid GCP filter>","description":"<short note>"}}"#
         );
 
-        let response = self.generate(&prompt).await?;
+        let response = self.generate_with_max_tokens(&prompt, 160).await?;
 
-        // Parse JSON response
         let cleaned = response
             .trim()
             .trim_start_matches("```json")
@@ -244,7 +322,7 @@ Response:"#,
             .map_err(|e| AiError::ParseError(format!("Failed to parse intent: {}", e)))?;
 
         let intent_type = json["intent"].as_str().unwrap_or("QUESTION");
-        let gcp_query = json["gcp_query"].as_str().unwrap_or("").to_string();
+        let gcp_query = json["gcp_query"].as_str().unwrap_or("").trim().to_string();
         let description = json["description"].as_str().unwrap_or("").to_string();
 
         match intent_type {
@@ -255,6 +333,7 @@ Response:"#,
             "GENERATE_QUERY" => Ok(UserIntent::GenerateQuery { query: gcp_query }),
             _ => Ok(UserIntent::Question {
                 question: input.to_string(),
+                gcp_query: (!gcp_query.is_empty()).then_some(gcp_query),
             }),
         }
     }
@@ -265,9 +344,8 @@ Response:"#,
 
         debug!("Generating query for: {}", description);
 
-        let response = self.generate(&prompt).await?;
+        let response = self.generate_with_max_tokens(&prompt, 160).await?;
 
-        // Clean up the response - remove Markdown code blocks if present
         let query = response
             .trim()
             .trim_start_matches("```")
@@ -280,40 +358,58 @@ Response:"#,
         Ok(query)
     }
 
-    /// Analyze multiple related logs for root cause (applying Pre-AI PII/Secret redaction when enabled).
+    /// Analyze multiple related logs for root cause (using Shared Context + RLE pattern folding + PII redaction + cache).
     pub async fn analyze_logs(&self, entries: &[LogEntry]) -> Result<String, AiError> {
         if entries.is_empty() {
             return Ok("No logs to analyze.".to_string());
         }
 
-        let mut total_stats = RedactionStats::default();
-        let mut logs_json: Vec<String> = Vec::new();
-        for entry in entries.iter().take(15) {
-            if let Ok(raw) = serde_json::to_string(entry) {
-                if self.redact_pii {
-                    let (scrubbed, st) = redact_sensitive_text(&raw);
-                    total_stats.merge(&st);
-                    logs_json.push(scrubbed);
-                } else {
-                    logs_json.push(raw);
-                }
-            }
+        let (compacted_timeline, compaction_stats) = compact_logs_for_rca(entries, 15);
+        let (scrubbed_timeline, redact_stats) = if self.redact_pii {
+            redact_sensitive_text(&compacted_timeline)
+        } else {
+            (compacted_timeline, RedactionStats::default())
+        };
+
+        let cache_key = format!(
+            "rca:{}:{}:{}",
+            self.provider.id(),
+            self.model,
+            scrubbed_timeline
+        );
+        if let Some(cached) = self.get_cached_response(&cache_key) {
+            return Ok(format!("⚡ Cached RCA (0 tokens used)\n\n{}", cached));
         }
 
-        let prompt = prompts::analyze_logs_prompt(&logs_json.join("\n---\n"));
+        let prompt = prompts::analyze_logs_prompt(&scrubbed_timeline);
 
         debug!(
-            count = logs_json.len(),
-            redactions = total_stats.total_redactions,
+            raw_entries = compaction_stats.raw_entries,
+            unique_events = compaction_stats.unique_events,
+            raw_tokens = compaction_stats.raw_tokens,
+            compacted_tokens = compaction_stats.compacted_tokens,
+            redactions = redact_stats.total_redactions,
             "Analyzing log entries"
         );
 
-        let analysis = self.generate(&prompt).await?;
-        if let Some(banner) = total_stats.banner() {
-            Ok(format!("{}\n\n{}", banner, analysis))
-        } else {
-            Ok(analysis)
+        let analysis = self.generate_with_max_tokens(&prompt, 700).await?;
+
+        let mut banners = Vec::new();
+        if let Some(b) = compaction_stats.badge() {
+            banners.push(b);
         }
+        if let Some(b) = redact_stats.banner() {
+            banners.push(b);
+        }
+
+        let formatted = if banners.is_empty() {
+            analysis
+        } else {
+            format!("{}\n\n{}", banners.join("\n"), analysis)
+        };
+
+        self.put_cached_response(cache_key, formatted.clone());
+        Ok(formatted)
     }
 
     /// Ask a question about the logs and get a human-readable answer.
@@ -322,15 +418,26 @@ Response:"#,
         question: &str,
         logs_client: &LogsClient,
     ) -> Result<QuestionAnswer, AiError> {
+        self.ask_question_with_query(question, None, logs_client)
+            .await
+    }
+
+    /// Ask a question reusing an optional pre-generated `gcp_query` from `detect_intent` (saves 1 full LLM call).
+    pub async fn ask_question_with_query(
+        &self,
+        question: &str,
+        pregenerated_query: Option<&str>,
+        logs_client: &LogsClient,
+    ) -> Result<QuestionAnswer, AiError> {
         debug!(question = %question, "Processing AI question");
 
-        // Step 1: Generate a query from the question
-        let raw_query = self.generate_query(question).await?;
-        debug!(raw_query = %raw_query, "Generated raw query");
+        let raw_query = match pregenerated_query.filter(|q| !q.trim().is_empty()) {
+            Some(q) => q.to_string(),
+            None => self.generate_query(question).await?,
+        };
         let query = sanitize_query(&raw_query);
         debug!(sanitized_query = %query, "Sanitized query");
 
-        // Step 2: Fetch logs using the generated query
         let entries = match fetch_logs_with_fallback(logs_client, &query).await {
             Ok(entries) => entries,
             Err(e) => {
@@ -348,7 +455,6 @@ Response:"#,
         let log_count = entries.len();
         debug!(log_count = log_count, "Fetched logs");
 
-        // Step 3: Analyze logs and generate answer
         let answer = self.analyze_and_answer(question, &entries).await?;
 
         Ok(QuestionAnswer {
@@ -364,22 +470,10 @@ Response:"#,
         question: &str,
         entries: &[LogEntry],
     ) -> Result<String, AiError> {
-        let raw_summary = if entries.is_empty() {
-            "No matching logs found.".to_string()
+        let (raw_summary, compaction_stats) = if entries.is_empty() {
+            ("No matching logs found.".to_string(), Default::default())
         } else {
-            entries
-                .iter()
-                .take(20)
-                .map(|e| {
-                    format!(
-                        "[{}] [{}] {}",
-                        e.timestamp_str(),
-                        e.severity_or_default(),
-                        e.message_preview()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
+            compact_logs_for_rca(entries, 15)
         };
 
         let (logs_summary, stats) = if self.redact_pii {
@@ -388,44 +482,20 @@ Response:"#,
             (raw_summary, RedactionStats::default())
         };
 
-        let prompt = format!(
-            r#"You are an expert Site Reliability Engineer (SRE) analyzing GCP logs.
+        let prompt = prompts::answer_question_prompt(question, &logs_summary, entries.len());
 
-## User's Question
-"{question}"
-
-## Query Results
-Found {count} matching log entries:
-
-```
-{logs}
-```
-
-## Your Task
-Answer the user's question directly and concisely based on the logs above.
-
-Guidelines:
-1. Answer in the SAME LANGUAGE as the question (if Chinese, respond in Chinese)
-2. Be direct - start with "Yes" or "No" if the question is yes/no
-3. If errors are found, briefly explain:
-   - What happened
-   - When it happened
-   - Potential impact
-   - Suggested next steps
-4. If no relevant logs found, say so clearly
-5. Keep the answer concise but informative (max 200 words)
-
-Your answer:"#,
-            question = question,
-            count = entries.len(),
-            logs = logs_summary
-        );
-
-        let answer = self.generate(&prompt).await?;
-        if let Some(banner) = stats.banner() {
-            Ok(format!("{}\n\n{}", banner, answer))
-        } else {
+        let answer = self.generate_with_max_tokens(&prompt, 450).await?;
+        let mut banners = Vec::new();
+        if let Some(b) = compaction_stats.badge() {
+            banners.push(b);
+        }
+        if let Some(b) = stats.banner() {
+            banners.push(b);
+        }
+        if banners.is_empty() {
             Ok(answer)
+        } else {
+            Ok(format!("{}\n\n{}", banners.join("\n"), answer))
         }
     }
 
@@ -443,19 +513,23 @@ Your answer:"#,
         self.ask_question(&question, logs_client).await
     }
 
-    /// Generate content using the configured AI provider (`Google`, `OpenAi`, `Anthropic`, or `Agnes`).
-    async fn generate(&self, prompt: &str) -> Result<String, AiError> {
+    /// Generate content using the configured AI provider with a task-specific `max_output_tokens` cap.
+    async fn generate_with_max_tokens(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, AiError> {
         match self.provider {
-            ProviderKind::Google => self.generate_google(prompt).await,
+            ProviderKind::Google => self.generate_google(prompt, max_tokens).await,
             ProviderKind::OpenAi | ProviderKind::Agnes => {
-                self.generate_openai_compatible(prompt).await
+                self.generate_openai_compatible(prompt, max_tokens).await
             }
-            ProviderKind::Anthropic => self.generate_anthropic(prompt).await,
+            ProviderKind::Anthropic => self.generate_anthropic(prompt, max_tokens).await,
         }
     }
 
     /// Generate content via Google Gemini REST API (`generateContent`).
-    async fn generate_google(&self, prompt: &str) -> Result<String, AiError> {
+    async fn generate_google(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
         let url = format!(
             "{}/{}:generateContent?key={}",
             self.base_url.trim_end_matches('/'),
@@ -471,7 +545,7 @@ Your answer:"#,
             }],
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.3),
-                max_output_tokens: Some(1024),
+                max_output_tokens: Some(max_tokens),
                 top_p: Some(0.8),
                 top_k: Some(40),
             }),
@@ -519,7 +593,11 @@ Your answer:"#,
     }
 
     /// Generate content via OpenAI-compatible `/chat/completions` (used by OpenAI and Agnes AI).
-    async fn generate_openai_compatible(&self, prompt: &str) -> Result<String, AiError> {
+    async fn generate_openai_compatible(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, AiError> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let request_body = OpenAiChatRequest {
@@ -529,7 +607,7 @@ Your answer:"#,
                 content: prompt.to_string(),
             }],
             temperature: Some(0.3),
-            max_tokens: Some(1024),
+            max_tokens: Some(max_tokens),
         };
 
         let response = self
@@ -570,12 +648,12 @@ Your answer:"#,
     }
 
     /// Generate content via Anthropic `/messages` API.
-    async fn generate_anthropic(&self, prompt: &str) -> Result<String, AiError> {
+    async fn generate_anthropic(&self, prompt: &str, max_tokens: u32) -> Result<String, AiError> {
         let url = format!("{}/messages", self.base_url.trim_end_matches('/'));
 
         let request_body = AnthropicMessagesRequest {
             model: self.model.clone(),
-            max_tokens: 1024,
+            max_tokens,
             temperature: Some(0.3),
             messages: vec![ChatMessage {
                 role: "user".to_string(),
@@ -793,5 +871,52 @@ mod tests {
         unsafe {
             std::env::remove_var("GEMINI_API_KEY");
         }
+    }
+
+    #[tokio::test]
+    async fn test_explain_log_pattern_lru_cache_zero_tokens_on_second_log() {
+        let client = GeminiClient::new("dummy-key-never-called".to_string());
+
+        // Seed cache for the normalized pattern of a connection timeout log
+        let sample_entry_1 = LogEntry {
+            insert_id: Some("log-1".to_string()),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Timeout calling payment-svc:8080 after 500ms".to_string()),
+            ..Default::default()
+        };
+        let fp = fingerprint_message(&sample_entry_1.message());
+        let cache_key = format!(
+            "explain:{}:{}:{}:{}:{}",
+            client.provider().id(),
+            client.model(),
+            sample_entry_1.severity_or_default(),
+            sample_entry_1.resource_type().unwrap_or("-"),
+            fp
+        );
+        client.put_cached_response(cache_key, "Root cause: payment-svc timeout".to_string());
+
+        // Now explain a DIFFERENT log entry with a different dynamic latency (750ms vs 500ms)
+        // and different insert_id ("log-2") — it matches the same normalized fingerprint and hits cache with 0 network calls!
+        let sample_entry_2 = LogEntry {
+            insert_id: Some("log-2".to_string()),
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Timeout calling payment-svc:8080 after 750ms".to_string()),
+            ..Default::default()
+        };
+        let result = client.explain_log(&sample_entry_2).await.unwrap();
+        assert!(result.contains("⚡ Cached Analysis (0 tokens used"));
+        assert!(result.contains("Root cause: payment-svc timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_detect_intent_zero_token_local_fast_path() {
+        let client = GeminiClient::new("dummy-key-never-called".to_string());
+
+        // Even with a dummy API key and no network, `detect_intent` resolves local filter commands in 0 tokens!
+        let intent = client.detect_intent("只看错误").await.unwrap();
+        assert!(matches!(
+            intent,
+            UserIntent::SetFilter { ref filter, .. } if filter == "severity>=ERROR"
+        ));
     }
 }

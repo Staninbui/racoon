@@ -7,25 +7,16 @@
 ///
 /// # Arguments
 ///
-/// * `log_json` - The log entry serialized as JSON
+/// * `log_json` - The compacted log entry serialized as JSON
 pub fn explain_log_prompt(log_json: &str) -> String {
     format!(
-        r#"You are an expert Site Reliability Engineer (SRE) and Google Cloud Platform specialist.
-
-Analyze this GCP log entry and provide a concise explanation:
-
-```json
+        r#"You are a Senior GCP SRE. Analyze this compacted log entry (max 160 words, no filler):
 {log_json}
-```
 
-Please provide:
-1. **Summary**: What this log entry indicates (1-2 sentences)
-2. **Severity Assessment**: Is this normal, concerning, or critical?
-3. **Impact**: What might be affected by this event?
-4. **Next Steps**: If action is needed, what should be done?
-
-Keep your response concise and actionable. Use bullet points where appropriate.
-Do not repeat the log content back - focus on insights."#
+Provide:
+1. **Summary**: What happened (1-2 sentences)
+2. **Severity & Impact**: Normal, warning, or critical? What is affected?
+3. **Next Steps**: Concrete remediation or investigation commands"#
     )
 }
 
@@ -36,28 +27,13 @@ Do not repeat the log content back - focus on insights."#
 /// * `description` - Natural language description of what to search for
 pub fn generate_query_prompt(description: &str) -> String {
     format!(
-        r#"You are a Google Cloud Logging query syntax expert.
-
-Convert this natural language request into a valid GCP Logging query:
-
-"{description}"
-
-Rules:
-1. Use correct GCP Logging query syntax
-2. Common fields: severity, resource.type, timestamp, textPayload, jsonPayload
-3. Common resource types: cloud_run_revision, gce_instance, gke_container, cloud_function, gae_app
-4. Severity levels: DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL, ALERT, EMERGENCY
-5. Use proper quoting for string values
-6. For time ranges, use relative expressions like: timestamp>="2024-01-01T00:00:00Z"
-
-Return ONLY the query string, no explanations or markdown.
-
+        r#"Convert to a valid GCP Cloud Logging filter query (return ONLY raw query syntax, no markdown):
+Request: "{description}"
+Fields: severity (DEBUG|INFO|WARNING|ERROR|CRITICAL), resource.type (cloud_run_revision|k8s_container|gce_instance|cloud_function), timestamp, textPayload, jsonPayload.
 Examples:
-- "errors from cloud run" → resource.type="cloud_run_revision" severity>=ERROR
-- "warnings in the last hour" → severity>=WARNING timestamp>="-1h"
-- "logs containing timeout" → "timeout"
-
-Your query:"#
+- "errors from cloud run" -> resource.type="cloud_run_revision" severity>=ERROR
+- "warnings in the last hour" -> severity>=WARNING timestamp>="-1h"
+Query:"#
     )
 }
 
@@ -65,23 +41,17 @@ Your query:"#
 ///
 /// # Arguments
 ///
-/// * `logs_text` - Multiple logs serialized, separated by ---
+/// * `logs_text` - Compacted & RLE-folded chronological logs
 pub fn analyze_logs_prompt(logs_text: &str) -> String {
     format!(
-        r#"You are an expert Site Reliability Engineer analyzing a series of related GCP logs.
-
-Logs (oldest first):
+        r#"You are a Senior GCP SRE performing Root Cause Analysis on chronological logs (`xN repeats` = folded identical patterns):
 {logs_text}
 
-Analyze these logs and provide:
-
-1. **Timeline Summary**: What happened in sequence?
-2. **Root Cause Analysis**: What might be the underlying cause?
-3. **Affected Components**: Which services/resources are impacted?
-4. **Recommendations**: What actions should be taken?
-
-Be concise and focus on actionable insights. If you cannot determine the root cause,
-suggest what additional information or logs might be helpful."#
+Provide concisely (max 240 words):
+1. **Timeline Summary**: Key sequence of events
+2. **Root Cause Analysis**: Primary trigger vs cascading symptoms
+3. **Affected Components**: Impacted services/resources
+4. **Recommendations**: Immediate fix & prevention"#
     )
 }
 

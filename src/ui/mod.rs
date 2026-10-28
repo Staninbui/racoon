@@ -139,9 +139,10 @@ pub async fn run_app(
                         if trace_entries.is_empty() {
                             AiResponse::Error("No logs found for trace analysis.".to_string())
                         } else {
-                            // Keep up to 15 most relevant chronological entries
-                            if trace_entries.len() > 15 {
-                                trace_entries = trace_entries.into_iter().take(15).collect();
+                            // Keep up to 50 chronological entries so `compact_logs_for_rca` can RLE-fold
+                            // repetitive retry storms down into 15 distinct timeline events.
+                            if trace_entries.len() > 50 {
+                                trace_entries = trace_entries.into_iter().take(50).collect();
                             }
                             let count = trace_entries.len();
                             let header = match filter_clause {
@@ -188,9 +189,19 @@ pub async fn run_app(
                                     ),
                                 }
                             }
-                            Ok(UserIntent::Question { question }) => {
+                            Ok(UserIntent::Question {
+                                question,
+                                gcp_query,
+                            }) => {
                                 if let Some(ref lc) = worker_logs_client {
-                                    match client.ask_question(&question, lc).await {
+                                    match client
+                                        .ask_question_with_query(
+                                            &question,
+                                            gcp_query.as_deref(),
+                                            lc,
+                                        )
+                                        .await
+                                    {
                                         Ok(qa) => AiResponse::QuestionAnswer {
                                             query: qa.query,
                                             log_count: qa.log_count,
