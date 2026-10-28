@@ -351,6 +351,70 @@ impl LogEntry {
             .map(|(_, short_id)| format!("🔗{}", short_id))
     }
 
+    /// Extract a positive service / resource filter clause and short badge for the `+` key
+    /// (e.g., `("resource.labels.service_name=\"checkout-api\"", "checkout-api")`).
+    pub fn service_filter_clause(&self) -> Option<(String, String)> {
+        const RESOURCE_SERVICE_KEYS: &[&str] = &[
+            "service_name",
+            "container_name",
+            "function_name",
+            "job_name",
+            "pod_name",
+            "revision_name",
+            "database_id",
+            "instance_id",
+        ];
+
+        const ENTRY_SERVICE_KEYS: &[&str] = &[
+            "k8s-pod/app",
+            "service",
+            "app",
+            "compute.googleapis.com/resource_name",
+        ];
+
+        if let Some(ref res) = self.resource
+            && let Some(ref rlabels) = res.labels
+        {
+            for &key in RESOURCE_SERVICE_KEYS {
+                if let Some(val) = rlabels.get(key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        return Some((
+                            format!("resource.labels.{}=\"{}\"", key, trimmed),
+                            shorten_id(trimmed, 24),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(ref labels) = self.labels {
+            for &key in ENTRY_SERVICE_KEYS {
+                if let Some(val) = labels.get(key) {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        return Some((
+                            format!("labels.{}=\"{}\"", key, trimmed),
+                            shorten_id(trimmed, 24),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(ref res) = self.resource {
+            let rtype = res.r#type.trim();
+            if !rtype.is_empty() {
+                return Some((
+                    format!("resource.type=\"{}\"", rtype),
+                    shorten_id(rtype, 24),
+                ));
+            }
+        }
+
+        None
+    }
+
     /// Build a Surrounding Context filter (`±window_secs` around this entry's timestamp,
     /// pinned to the same resource instance when available, with all severity levels unlocked)
     /// and a short human-readable scope badge (`s` key).

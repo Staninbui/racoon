@@ -75,7 +75,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else if let Some(ref filter) = app.filter {
         Paragraph::new(format!(
-            "Filter: {} │ f: Change │ -: Mute │ s: ±5s │ c: Radar │ x: Trace │ E: RCA │ w: Report │ Esc: Clear",
+            "Filter: {} │ f: Edit │ +/-: Pin/Mute │ b: Bookmarks │ s: ±5s │ c: Radar │ x: Trace │ E: RCA │ w: Report │ h: Help │ Esc: Clear",
             filter
         ))
         .style(Style::default().fg(Color::Cyan))
@@ -86,7 +86,7 @@ fn render_hints(frame: &mut Frame, app: &App, area: Rect) {
         )
     } else {
         let hints_text = "\
-j/k: Nav │ Tab/z: Focus/Max │ b: Bookmark │ -: Mute │ s: ±5s Context │ c: Radar │ x: Trace │ e/E: AI Explain/RCA │ w: Report
+j/k: Nav │ Tab/z: Focus/Max │ b: Bookmark │ +/-: Pin/Mute │ s: ±5s │ c: Radar │ x: Trace │ e/E: AI/RCA │ w: Report │ h: Help
 /: Search │ f: Filter │ y/Y: Copy │ o: Open GCP │ ?: Ask AI / Follow-up │ m: Model │ p: Pause │ t: Theme │ Esc: Clear │ q: Quit";
         Paragraph::new(hints_text).style(colors.dim_style()).block(
             Block::default()

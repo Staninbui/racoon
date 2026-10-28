@@ -206,6 +206,7 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `z` | Toggle **Full-Screen Maximize** for the currently focused pane (`Esc` to restore) |
 | `b` | Cycle **Saved Filter Bookmarks** (`[bookmarks]` in `config.toml` + built-in SRE presets) |
 | `c` | Toggle **Error Fingerprint & Spike Radar** (`Enter` to drill into selected cluster) |
+| `+` / `=` | **Pin / Isolate Service** of the selected log entry (`resource.labels.service_name`, etc., `Esc` to restore) |
 | `-` | **Mute / Exclude** the selected noisy log pattern (`-fingerprint:"..."`, `Esc` to restore) |
 | `s` | Toggle **Surrounding Logs Context** on the same resource instance (`🎯` marks anchor log) |
 | `[` / `]` | Shrink / Expand Surrounding Context time window (`±5s` ↔ `±15s` ↔ `±30s` ↔ `±60s` ↔ `±300s`) |
@@ -213,6 +214,7 @@ racoon tail --project my-project --since 1h --severity WARNING
 | `e` | Explain selected log (or selected Error Cluster) with AI |
 | `E` (`Shift+e`) | Run **Full-Trace / Surrounding Context AI Root Cause Analysis (RCA)** |
 | `w` | Save a self-contained **Markdown Incident Snapshot** (`incident-<timestamp>.md`) |
+| `h` / `F1` | Toggle full-screen **Keyboard Shortcuts Cheat Sheet** |
 | `y` | Copy selected log JSON (or Error Cluster summary + JSON) to clipboard |
 | `Y` (`Shift+y`) | Copy AI analysis / RCA Markdown report to clipboard |
 | `o` | Open selected log entry in **Google Cloud Logs Explorer** in browser |

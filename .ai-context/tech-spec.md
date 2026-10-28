@@ -1,47 +1,44 @@
-# Technical Specification: Phase 2 Profiles, Contextual AI, Stdin Pipe & Release Diff
+# Technical Specification: Phase 3 Help Modal, Spike Alerting, Service Pin & Release Prep
 
 ## Architecture & Component Flow
 
 ```mermaid
 flowchart TD
-    CLI["src/cli.rs (--profile, racoon diff, racoon view -)"] --> Config["src/config.rs (ProfileConfig, Bookmarks)"]
-    CLI --> Import["src/storage/import.rs (import_logs_from_reader + Plain-Text Parser)"]
-    CLI --> Diff["src/ui/radar.rs (compute_log_diff -> LogDiffReport)"]
-    TUI["src/ui/app.rs + src/ui/mod.rs ('b' Bookmark Cycle, '?' Contextual Follow-up)"] --> AI["src/ai/agent.rs (ask_followup + followup_question_prompt)"]
+    Entry["src/gcp/logs/entry.rs (service_filter_clause)"] --> App["src/ui/app.rs (show_help, pin_selected_service, active_spike_alert)"]
+    Radar["src/ui/radar.rs (SpikeRadar::record_entry -> Option<SpikeAlert>)"] --> App
+    Input["src/ui/input.rs ('h'/'F1' Help, '+'/'=' Service Pin)"] --> App
+    App --> UI["src/ui/mod.rs + src/ui/widgets/detail.rs (render_help_modal, Detail Search Highlight, Header Spike Badge)"]
 ```
 
 ## Detailed Design
 
-### 1. Named Profiles & Filter Bookmarks (`src/config.rs`, `src/cli.rs`, `src/ui/app.rs`, `src/ui/input.rs`)
-- In `src/config.rs`:
-  - `ProfileConfig`: `project: Option<String>`, `impersonate_service_account: Option<String>`, `filter: Option<String>`, `severity: Option<String>`, `since: Option<String>`.
-  - Add `#[serde(default)] pub profiles: BTreeMap<String, ProfileConfig>` and `#[serde(default)] pub bookmarks: BTreeMap<String, String>` to `Config`.
-  - `Config::apply_profile(&mut self, name: &str) -> Result<ProfileConfig, String>`: merges the profile into `self.defaults` and returns the resolved `ProfileConfig`.
-  - `Config::effective_bookmarks(&self) -> Vec<(String, String)>`: returns user bookmarks from `self.bookmarks` followed by built-in SRE bookmarks (deduplicated by name).
+### 1. Help Modal (`h` / `F1` key) (`src/ui/app.rs`, `src/ui/input.rs`, `src/ui/widgets/detail.rs`, `src/ui/mod.rs`)
+- Add `pub show_help: bool` to `App` (default `false`) and `pub fn toggle_help(&mut self)`.
+- When `app.show_help` is `true`, pressing `Esc`, `h`, or `F1` closes the help modal.
+- Render `render_help_modal(frame, app, area)` over the main workspace area when `app.show_help` is `true`, listing all shortcuts in 5 sections:
+  - Navigation & Panes (`j/k`, `g/G`, `Tab/Shift+Tab`, `z`, `Ctrl+j/k`, `Ctrl+n/p`)
+  - Incident Triage & Context (`c`, `Enter`, `s`, `[/]`, `x`)
+  - Filtering & Noise Control (`f`, `b`, `+`, `-`, `/`, `n/N`, `Esc`)
+  - AI Root Cause Analysis (`e`, `E`, `?`, `m`)
+  - Export & External Actions (`w`, `y`, `Y`, `o`, `p`, `t`, `q`)
+
+### 2. Real-Time Spike & New Error Alerting (`src/ui/radar.rs`, `src/ui/app.rs`, `src/ui/mod.rs`)
+- Define `SpikeAlert` in `src/ui/radar.rs`:
+  - `NewErrorPattern { severity: String, fingerprint: String }` (emitted when a new cluster has `severity` in `ERROR`, `CRITICAL`, `ALERT`, `EMERGENCY`)
+  - `SpikeThresholdCrossed { severity: String, fingerprint: String, count: usize }` (emitted when an existing cluster transitions from `!was_spike` to `is_spike`)
+- Update `SpikeRadar::record_entry(&mut self, entry: &LogEntry) -> Option<SpikeAlert>`.
+- In `App`:
+  - Add `pub active_spike_alert: Option<String>` and `pub pending_bell: bool`.
+  - In `App::add_log`, if `self.radar.record_entry(&entry)` returns `Some(alert)`, set `self.active_spike_alert = Some(alert.summary())` and `if self.is_streaming { self.pending_bell = true; }`.
+  - Add `App::take_pending_bell(&mut self) -> bool` and `App::dismiss_spike_alert(&mut self)`.
+  - Opening Radar (`c`) or pressing `Esc` clears `active_spike_alert`.
+
+### 3. 1-Keystroke Service / Resource Filter Pin (`+` / `=` key) & Detail Search Highlighting (`src/gcp/logs/entry.rs`, `src/ui/app.rs`, `src/ui/input.rs`, `src/ui/widgets/detail.rs`)
+- In `src/gcp/logs/entry.rs`:
+  - `pub fn service_filter_clause(&self) -> Option<(String, String)>`: checks `resource.labels` (`service_name`, `container_name`, `function_name`, `job_name`, `pod_name`, `revision_name`, `database_id`, `instance_id`), then `labels` (`k8s-pod/app`, `service`, `app`), then `resource.type`, returning `(gcp_filter_clause, short_badge)`.
 - In `src/ui/app.rs` & `src/ui/input.rs`:
-  - Add `pub bookmarks: Vec<(String, String)>` and `pub bookmark_index: Option<usize>` to `App`.
-  - `App::cycle_next_bookmark(&mut self) -> Option<(String, String)>`: advances `bookmark_index`, calls `self.clear_context_overlay()`, `self.set_filter(Some(filter.clone()))`, sets `status_message` (`"🔖 Bookmark [i/n] <name>: <filter>"`), and returns `Some((name, filter))`.
-  - Pressing `b` in Normal mode calls `app.cycle_next_bookmark()` and returns `Action::ApplyFilter(Some(filter))`.
-
-### 2. Contextual AI Multi-Turn Follow-up (`src/ai/prompts.rs`, `src/ai/agent.rs`, `src/ui/mod.rs`)
-- In `src/ai/prompts.rs`:
-  - Add `pub fn followup_question_prompt(question: &str, previous_analysis: &str, logs_context: &str) -> String`.
-- In `src/ai/agent.rs`:
-  - Add `pub async fn ask_followup(&self, question: &str, previous_analysis: &str, selected_log: Option<&LogEntry>, local_logs: &[LogEntry]) -> Result<String, AiError>`.
-  - Compacts `selected_log` (if present) or `local_logs` using `compact_log_for_ai` / `compact_logs_for_rca`, applies `redact_sensitive_text` when `self.redact_pii` is enabled, and queries the active provider.
-- In `src/ui/mod.rs`:
-  - Extend `AiRequest::AskQuestion` with `previous_analysis: Option<String>` and `selected_log: Option<Box<LogEntry>>`.
-  - When `detect_intent` returns `UserIntent::Question`: if `previous_analysis.is_some()` or `worker_logs_client.is_none()`, use `client.ask_followup(...)` to provide a context-aware answer!
-
-### 3. Stdin Pipe (`racoon view -`) & Plain-Text Log Parser (`src/storage/import.rs`, `src/main.rs`)
-- In `src/storage/import.rs`:
-  - Add `pub fn import_logs_from_str(content: &str, source_label: &str) -> Result<ImportResult, ImportError>` and `pub fn parse_plain_text_log_line(line: &str) -> LogEntry`.
-  - `import_logs` delegates to `import_logs_from_str` (or reader) and supports JSON arrays, wrapped JSON, NDJSON, and plain-text log files/streams seamlessly!
-  - In `src/main.rs` (`handle_view`): if `args.file == "-"`, read from `std::io::stdin()` into `import_logs_from_str(&buf, "stdin")`.
-
-### 4. Post-Deployment Error Fingerprint Diff (`racoon diff`) (`src/ui/radar.rs`, `src/cli.rs`, `src/main.rs`)
-- In `src/ui/radar.rs`:
-  - Define `DiffPatternEntry { fingerprint, severity, baseline_count, current_count, sample_message }` and `LogDiffReport { baseline_total_logs, current_total_logs, baseline_error_logs, current_error_logs, new_patterns, regressed_patterns, resolved_patterns, unchanged_patterns }`.
-  - Implement `pub fn compute_log_diff(baseline: &[LogEntry], current: &[LogEntry]) -> LogDiffReport` and `LogDiffReport::format_report(&self) -> String`.
-- In `src/cli.rs` & `src/main.rs`:
-  - Add `Commands::Diff(DiffArgs)` supporting `--baseline-file` + `--current-file` (offline comparison) OR `--project` + `--baseline` + `--current` (live GCP window comparison, e.g. `2h..1h` vs `1h..now`), plus `--json` and `--ai`.
+  - Add `pub active_service_pin: bool` to `App` and `pub fn pin_selected_service(&mut self) -> Result<String, String>`.
+  - Pressing `+` or `=` when `active_surrounding.is_none()` calls `app.pin_selected_service()` and returns `Action::ApplyFilter(Some(new_filter))`.
+  - Pressing `Esc` exits `active_service_pin` and restores `previous_filter`.
+- In `src/ui/widgets/detail.rs`:
+  - When `app.search_query` is `Some(ref q)`, highlight lines containing `q` (case-insensitive) in `render_detail_pane`.

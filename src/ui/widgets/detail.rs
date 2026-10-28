@@ -67,8 +67,29 @@ pub fn render_detail_pane(frame: &mut Frame, app: &App, area: Rect) {
         colors.border_style()
     };
 
-    let paragraph = Paragraph::new(content)
-        .style(Style::default().fg(colors.fg))
+    let styled_lines: Vec<Line> = if let Some(ref q) = app.search_query {
+        let needle = q.to_lowercase();
+        content
+            .lines()
+            .map(|l| {
+                if !needle.is_empty() && l.to_lowercase().contains(&needle) {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(colors.fg).bg(colors.search_match_bg),
+                    ))
+                } else {
+                    Line::from(Span::styled(l.to_string(), Style::default().fg(colors.fg)))
+                }
+            })
+            .collect()
+    } else {
+        content
+            .lines()
+            .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(colors.fg))))
+            .collect()
+    };
+
+    let paragraph = Paragraph::new(styled_lines)
         .block(
             Block::default()
                 .title(detail_title)
@@ -118,14 +139,16 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
             "Press 'e' to explain selected log (or selected Error Cluster)",
             "Press 's' to inspect surrounding logs ([ / ] to resize ±5s..±300s)",
             "Press 'c' to toggle Error Fingerprint & Spike Radar",
-            "Press '-' to mute/exclude the selected noisy log pattern",
+            "Press '+' to pin service/resource or '-' to mute noisy pattern",
+            "Press 'b' to cycle through saved SRE filter bookmarks",
             "Press 'x' to isolate full request trace across services",
             "Press 'E' (Shift+e) for Full-Trace / Context AI Root Cause Analysis",
             "Press 'w' to save a Markdown Incident Snapshot Report",
             "Press 'Tab' to switch pane focus and 'z' to toggle full-screen maximize",
             "Press 'y' / 'Y' to copy Log JSON or AI Analysis to clipboard",
             "Press 'o' to open selected log in Google Cloud Logs Explorer",
-            "Press '?' to ask a natural-language question about your logs",
+            "Press '?' to ask a natural-language question or follow-up",
+            "Press 'h' or 'F1' to open full Keyboard Shortcut Cheat Sheet",
             "Press 'm' to switch AI Provider & Model interactively",
         ]
         .join("\n");
@@ -167,6 +190,65 @@ pub fn render_ai_pane(frame: &mut Frame, app: &App, area: Rect) {
         )
         .wrap(Wrap { trim: true })
         .scroll((app.ai_scroll, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
+/// Render the full-pane Keyboard Shortcut Help Cheat Sheet (`h` / `F1` key).
+pub fn render_help_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let colors = app.colors();
+    let cheat_sheet = "\
+🧭 NAVIGATION & PANES
+  j / k or ↓ / ↑     Move selection (Logs) or scroll active pane (Detail / AI)
+  g / G or Home/End  Jump to first / last log entry (or top / bottom of pane)
+  PageUp / PageDown  Scroll 10 lines up / down in the focused pane
+  Tab / Shift+Tab    Cycle keyboard focus across Logs → Detail → AI panes
+  z                  Toggle full-screen maximize for the focused pane
+  Ctrl+j / Ctrl+k    Scroll Detail JSON pane down / up from any focus
+  Ctrl+n / Ctrl+p    Scroll AI Analysis pane down / up from any focus
+
+🚨 INCIDENT TRIAGE & CONTEXT
+  c                  Toggle Error Fingerprint & Spike Radar (velocity sparklines)
+  Enter (in Radar)   Drill down into logs matching the selected Error Cluster
+  s                  Toggle ±5s Surrounding Context on the same instance/Pod
+  [ / ]              Shrink / expand Surrounding Context window (±5s ↔ ±15s ↔ ±30s ↔ ±60s ↔ ±300s)
+  x                  Isolate all logs sharing the selected entry's Trace / Span / Request ID
+
+🔍 FILTERING, BOOKMARKS & NOISE CONTROL
+  f                  Enter GCP Filter input mode (↑ / ↓ to recall persistent history)
+  b                  Cycle through saved user & built-in SRE filter bookmarks
+  + / =              Pin / isolate logs from the selected entry's service or resource
+  -                  Mute / exclude the selected noisy log pattern (-fingerprint:\"...\")
+  / , n / N          Search buffered logs (highlights matches in both List & Detail JSON)
+  Esc                Step-by-step restore: close Help/Maximize → exit Context/Mute/Pin → clear Filter
+
+🤖 AI ROOT CAUSE ANALYSIS
+  e                  Explain selected log entry (or selected Error Cluster) with AI
+  E (Shift+e)        Run Full-Trace / Multi-Log Root Cause Analysis (RCA)
+  ?                  Ask natural-language question (retains prior AI diagnosis for multi-turn follow-up)
+  m                  Open interactive AI Provider & Model selector (Gemini, Vertex ADC, OpenAI, Claude, Agnes)
+
+📤 EXPORT & ACTIONS
+  w                  Save self-contained Markdown Incident Snapshot (incident-<timestamp>.md)
+  y / Y              Copy selected Log JSON (y) or AI Analysis Markdown (Y) to clipboard
+  o                  Open selected log in Google Cloud Logs Explorer in browser
+  p / t / h / q      Pause/Resume stream (p) │ Toggle Theme (t) │ Toggle Help (h/F1) │ Quit (q)";
+
+    let paragraph = Paragraph::new(cheat_sheet)
+        .style(Style::default().fg(colors.fg))
+        .block(
+            Block::default()
+                .title(
+                    " ⌨️  Racoon Keyboard Shortcuts Cheat Sheet (Press 'h', 'F1', or 'Esc' to close) ",
+                )
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+        )
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, area);
 }

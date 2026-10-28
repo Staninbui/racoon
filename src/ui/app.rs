@@ -88,6 +88,18 @@ pub struct App {
     /// Whether one or more noisy patterns have been muted via `-` key.
     pub active_pattern_mute: bool,
 
+    /// Whether the view is pinned to a specific service/resource via `+` key.
+    pub active_service_pin: bool,
+
+    /// Whether the keyboard shortcut help modal (`h` / `F1` key) is open.
+    pub show_help: bool,
+
+    /// Latest unacknowledged spike/new-error alert banner from `SpikeRadar`.
+    pub active_spike_alert: Option<String>,
+
+    /// Whether a terminal bell (`\x07`) should be emitted on the next render tick.
+    pub pending_bell: bool,
+
     /// Currently focused pane (`Logs`, `Detail`, or `Ai`).
     pub focused_pane: ActivePane,
 
@@ -187,6 +199,10 @@ impl App {
             surrounding_window_secs: 5,
             active_cluster_drilldown: false,
             active_pattern_mute: false,
+            active_service_pin: false,
+            show_help: false,
+            active_spike_alert: None,
+            pending_bell: false,
             focused_pane: ActivePane::Logs,
             maximized_pane: None,
             bookmarks: crate::config::default_sre_bookmarks(),
@@ -291,10 +307,26 @@ impl App {
     /// Toggle Error Fingerprint & Spike Radar view (`c` key).
     pub fn toggle_radar(&mut self) {
         self.show_radar = !self.show_radar;
+        self.active_spike_alert = None;
         if self.show_radar {
             self.radar_selected_index = 0;
             self.detail_scroll = 0;
         }
+    }
+
+    /// Toggle the keyboard shortcut Help Modal (`h` / `F1` key).
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
+    /// Consume and return whether a terminal bell (`\x07`) should be emitted.
+    pub fn take_pending_bell(&mut self) -> bool {
+        std::mem::take(&mut self.pending_bell)
+    }
+
+    /// Dismiss the active spike alert banner in the header.
+    pub fn dismiss_spike_alert(&mut self) {
+        self.active_spike_alert = None;
     }
 
     /// Return the currently selected `ErrorCluster` when in Radar view.
@@ -311,6 +343,7 @@ impl App {
             || self.active_trace.is_some()
             || self.active_cluster_drilldown
             || self.active_pattern_mute
+            || self.active_service_pin
     }
 
     /// Cycle keyboard focus forward across panes (`Logs -> Detail -> Ai -> Logs`).
@@ -402,6 +435,43 @@ impl App {
         }
         self.set_status(format!("🔇 Muted pattern: {} (Esc to restore)", fp));
         Ok(fp)
+    }
+
+    /// Pin/isolate the service or resource of the currently selected log entry (`+` / `=` key).
+    /// Restored on `Esc`.
+    pub fn pin_selected_service(&mut self) -> Result<String, String> {
+        let entry = if let Some(cluster) = self.selected_cluster() {
+            cluster.sample_entry.clone()
+        } else if let Some(entry) = self.selected_log() {
+            entry.clone()
+        } else {
+            return Err("No log entry selected to pin service.".to_string());
+        };
+
+        let (clause, badge) = entry.service_filter_clause().ok_or_else(|| {
+            "Selected log has no service_name, container_name, or resource.type to pin.".to_string()
+        })?;
+
+        if !self.has_active_overlay() {
+            self.previous_filter = self.filter.clone();
+        }
+        self.active_service_pin = true;
+        let new_filter = match self
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(existing) if existing.contains(&clause) => existing.to_string(),
+            Some(existing) => format!("{} {}", existing, clause),
+            None => clause,
+        };
+        self.set_filter(Some(new_filter.clone()));
+        self.set_status(format!(
+            "📌 Pinned service/resource: {} (Esc to restore)",
+            badge
+        ));
+        Ok(new_filter)
     }
 
     /// Toggle Distributed Trace Context mode (`x` key).
@@ -524,7 +594,7 @@ impl App {
         restored
     }
 
-    /// Clear all temporary context overlay states (Trace, Surrounding, Radar cluster drill-down, Mute)
+    /// Clear all temporary context overlay states (Trace, Surrounding, Radar cluster drill-down, Mute, Service Pin)
     /// when a brand-new user or AI filter is explicitly applied.
     pub fn clear_context_overlay(&mut self) {
         self.active_trace = None;
@@ -534,10 +604,11 @@ impl App {
         self.surrounding_window_secs = 5;
         self.active_cluster_drilldown = false;
         self.active_pattern_mute = false;
+        self.active_service_pin = false;
         self.previous_filter = None;
     }
 
-    /// If any temporary context overlay (Surrounding, Trace, Radar drill-down, or Pattern Mute) is active,
+    /// If any temporary context overlay (Surrounding, Trace, Radar drill-down, Pattern Mute, or Service Pin) is active,
     /// exit it and restore `previous_filter`, returning `Some(restored_filter)`.
     pub fn exit_active_overlay(&mut self) -> Option<Option<String>> {
         if self.active_surrounding.is_some() {
@@ -546,8 +617,9 @@ impl App {
             Some(self.exit_trace_context())
         } else if self.active_cluster_drilldown {
             Some(self.exit_cluster_drilldown())
-        } else if self.active_pattern_mute {
+        } else if self.active_pattern_mute || self.active_service_pin {
             self.active_pattern_mute = false;
+            self.active_service_pin = false;
             let restored = self.previous_filter.take();
             self.set_filter(restored.clone());
             Some(restored)
@@ -580,7 +652,12 @@ impl App {
             return;
         }
 
-        self.radar.record_entry(&entry);
+        if let Some(alert) = self.radar.record_entry(&entry) {
+            self.active_spike_alert = Some(alert.summary());
+            if self.is_streaming {
+                self.pending_bell = true;
+            }
+        }
 
         let was_at_bottom = self.is_at_bottom();
         let matches_active_search = self
@@ -1776,5 +1853,58 @@ mod tests {
         assert_eq!(name2, "Only Warnings");
         assert_eq!(filter2, "severity>=WARNING");
         assert_eq!(app.logs.len(), 2);
+    }
+
+    #[test]
+    fn test_app_help_modal_spike_alert_and_service_pin() {
+        use crate::gcp::logs::MonitoredResource;
+        use std::collections::HashMap;
+
+        let mut labels_a = HashMap::new();
+        labels_a.insert("service_name".to_string(), "checkout-api".to_string());
+        let mut labels_b = HashMap::new();
+        labels_b.insert("service_name".to_string(), "inventory-worker".to_string());
+
+        let mut app = App::new("prod-proj".to_string());
+        assert!(!app.show_help);
+        app.toggle_help();
+        assert!(app.show_help);
+        app.toggle_help();
+        assert!(!app.show_help);
+
+        // Live streaming log with ERROR triggers active_spike_alert and pending_bell
+        app.add_log(LogEntry {
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Checkout failed on order 42".to_string()),
+            resource: Some(MonitoredResource {
+                r#type: "cloud_run_revision".to_string(),
+                labels: Some(labels_a),
+            }),
+            ..Default::default()
+        });
+        assert!(app.active_spike_alert.is_some());
+        assert!(app.take_pending_bell());
+        assert!(!app.take_pending_bell());
+
+        app.add_log(LogEntry {
+            severity: Some("INFO".to_string()),
+            text_payload: Some("Inventory synced".to_string()),
+            resource: Some(MonitoredResource {
+                r#type: "cloud_run_revision".to_string(),
+                labels: Some(labels_b),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(app.logs.len(), 2);
+
+        // Select first log (checkout-api) and pin its service (`+` key)
+        app.selected_index = 0;
+        let pinned_filter = app.pin_selected_service().unwrap();
+        assert_eq!(
+            pinned_filter,
+            "resource.labels.service_name=\"checkout-api\""
+        );
+        assert_eq!(app.logs.len(), 1);
+        assert_eq!(app.logs[0].message(), "Checkout failed on order 42");
     }
 }

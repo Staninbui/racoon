@@ -162,6 +162,12 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
 
+        // Toggle Keyboard Shortcut Help Modal (`h` / `F1` key)
+        KeyCode::Char('h') | KeyCode::F(1) => {
+            app.toggle_help();
+            Action::None
+        }
+
         // Mute / exclude selected log pattern (`-` key)
         KeyCode::Char('-') => {
             if let Err(err_msg) = app.mute_selected_pattern() {
@@ -200,6 +206,15 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
                 }
             }
         }
+
+        // Pin / isolate selected log's service or resource (`+` / `=` key when not in Surrounding mode)
+        KeyCode::Char('+') | KeyCode::Char('=') => match app.pin_selected_service() {
+            Ok(new_filter) => Action::ApplyFilter(Some(new_filter)),
+            Err(err_msg) => {
+                app.set_error(err_msg);
+                Action::None
+            }
+        },
 
         // Save self-contained Markdown incident snapshot (`w` key)
         KeyCode::Char('w') => Action::SaveIncidentReport,
@@ -331,8 +346,13 @@ fn handle_normal_mode(app: &mut App, key: KeyEvent) -> Action {
             }
         },
 
-        // Clear maximize / search / exit Radar mode / exit Trace or Surrounding mode / clear filter
+        // Clear help / maximize / search / exit Radar mode / exit Trace or Surrounding mode / clear filter
         KeyCode::Esc => {
+            app.dismiss_spike_alert();
+            if app.show_help {
+                app.show_help = false;
+                return Action::None;
+            }
             if app.maximized_pane.is_some() {
                 app.maximized_pane = None;
                 return Action::None;
@@ -729,5 +749,50 @@ mod tests {
         // 'b' cycles through filter bookmarks and triggers ApplyFilter
         let b_action = handle_key_event(&mut app, make_key(KeyCode::Char('b')));
         assert!(matches!(b_action, Action::ApplyFilter(Some(_))));
+    }
+
+    #[test]
+    fn test_help_key_h_and_service_pin_key_plus() {
+        use crate::gcp::logs::MonitoredResource;
+        use std::collections::HashMap;
+
+        let mut labels = HashMap::new();
+        labels.insert("service_name".to_string(), "payment-svc".to_string());
+
+        let mut app = App::new("prod-proj".to_string()).with_offline_logs(vec![
+            LogEntry {
+                severity: Some("ERROR".to_string()),
+                text_payload: Some("Payment failed".to_string()),
+                resource: Some(MonitoredResource {
+                    r#type: "cloud_run_revision".to_string(),
+                    labels: Some(labels),
+                }),
+                ..Default::default()
+            },
+            LogEntry {
+                severity: Some("INFO".to_string()),
+                text_payload: Some("Other service log".to_string()),
+                ..Default::default()
+            },
+        ]);
+
+        // 'h' toggles help modal on, and Esc closes it first
+        handle_key_event(&mut app, make_key(KeyCode::Char('h')));
+        assert!(app.show_help);
+        handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(!app.show_help);
+
+        // '+' pins the selected log's service and returns ApplyFilter
+        let plus_action = handle_key_event(&mut app, make_key(KeyCode::Char('+')));
+        assert!(matches!(
+            plus_action,
+            Action::ApplyFilter(Some(ref f)) if f == "resource.labels.service_name=\"payment-svc\""
+        ));
+        assert_eq!(app.logs.len(), 1);
+
+        // Esc exits the service pin and restores all 2 logs
+        let esc_action = handle_key_event(&mut app, make_key(KeyCode::Esc));
+        assert!(matches!(esc_action, Action::ApplyFilter(None)));
+        assert_eq!(app.logs.len(), 2);
     }
 }

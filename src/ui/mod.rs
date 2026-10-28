@@ -12,12 +12,12 @@ pub mod widgets;
 
 pub use app::{ActivePane, App, InputMode};
 pub use radar::{
-    DiffPatternEntry, ErrorCluster, LogDiffReport, SpikeRadar, compute_log_diff,
+    DiffPatternEntry, ErrorCluster, LogDiffReport, SpikeAlert, SpikeRadar, compute_log_diff,
     fingerprint_message,
 };
 pub use selector::{ModelSelectorState, run_model_selector, select_with_terminal};
 
-use std::io;
+use std::io::{self, Write};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -31,7 +31,9 @@ use crate::config::Config;
 use crate::gcp::{LogEntry, LogFilter, LogsClient};
 use crate::ui::theme::Theme;
 use crate::utils::sanitize_query;
-use widgets::{render_ai_pane, render_detail_pane, render_input_bar, render_log_list};
+use widgets::{
+    render_ai_pane, render_detail_pane, render_help_modal, render_input_bar, render_log_list,
+};
 
 type Term = Terminal<CrosstermBackend<io::Stdout>>;
 
@@ -531,6 +533,10 @@ async fn run_event_loop(
                 app.add_log(entry);
             }
         }
+        if app.take_pending_bell() {
+            let _ = io::stdout().write_all(b"\x07");
+            let _ = io::stdout().flush();
+        }
 
         while let Ok(response) = ai_rx.try_recv() {
             match response {
@@ -574,6 +580,22 @@ async fn run_event_loop(
 /// Render the complete UI.
 fn render_ui(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    if app.show_help {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(4),
+            ])
+            .split(area);
+
+        render_header(frame, app, chunks[0]);
+        render_help_modal(frame, app, chunks[1]);
+        render_input_bar(frame, app, chunks[2]);
+        return;
+    }
 
     if let Some(max_pane) = app.maximized_pane {
         let chunks = Layout::default()
@@ -647,11 +669,21 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         project, log_count, app.ai_model_label, theme_indicator,
     );
 
-    let header = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(header_text, colors.header_style()),
         Span::styled(status, status_style),
-    ]))
-    .block(
+    ];
+
+    if let Some(ref alert) = app.active_spike_alert {
+        spans.push(Span::styled(
+            format!(" │ {} (c: Radar)", alert),
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let header = Paragraph::new(Line::from(spans)).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(colors.border_focused_style()),

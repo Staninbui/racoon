@@ -209,6 +209,40 @@ pub fn compute_log_diff(baseline: &[LogEntry], current: &[LogEntry]) -> LogDiffR
     }
 }
 
+/// Alert emitted by `SpikeRadar::record_entry` when a brand-new `ERROR`/`CRITICAL` pattern
+/// appears or an existing pattern crosses the spike threshold (`count == 3`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpikeAlert {
+    /// A brand-new `ERROR` / `CRITICAL` / `ALERT` / `EMERGENCY` fingerprint was observed for the first time.
+    NewErrorPattern {
+        severity: String,
+        fingerprint: String,
+    },
+    /// An existing cluster crossed the spike threshold (`count == 3`).
+    SpikeThresholdCrossed {
+        severity: String,
+        fingerprint: String,
+        count: usize,
+    },
+}
+
+impl SpikeAlert {
+    /// Format a compact alert banner for the TUI header or status bar.
+    pub fn summary(&self) -> String {
+        match self {
+            SpikeAlert::NewErrorPattern {
+                severity,
+                fingerprint,
+            } => format!("🚨 NEW {}: {}", severity, fingerprint),
+            SpikeAlert::SpikeThresholdCrossed {
+                severity,
+                fingerprint,
+                count,
+            } => format!("🚨 SPIKE (x{}) [{}]: {}", count, severity, fingerprint),
+        }
+    }
+}
+
 /// A clustered group of logs sharing the same normalized error fingerprint.
 #[derive(Debug, Clone)]
 pub struct ErrorCluster {
@@ -270,7 +304,10 @@ impl SpikeRadar {
     }
 
     /// Ingest a single `LogEntry`, updating velocity buckets and error clusters if severity >= WARNING.
-    pub fn record_entry(&mut self, entry: &LogEntry) {
+    ///
+    /// Returns `Some(SpikeAlert)` when a brand-new `ERROR`/`CRITICAL` pattern appears or when an
+    /// existing cluster crosses the spike threshold (`count == 3`).
+    pub fn record_entry(&mut self, entry: &LogEntry) -> Option<SpikeAlert> {
         let sev = entry.severity_or_default().to_uppercase();
         let is_err_or_warn = matches!(
             sev.as_str(),
@@ -293,13 +330,15 @@ impl SpikeRadar {
         }
 
         if !is_err_or_warn {
-            return;
+            return None;
         }
 
         let fp = fingerprint_message(&entry.message_preview());
         let ts = entry.timestamp_str();
+        let mut alert = None;
 
         if let Some(existing) = self.clusters.iter_mut().find(|c| c.fingerprint == fp) {
+            let was_spike = existing.is_spike;
             existing.count += 1;
             existing.last_seen = ts;
             if severity_weight(&sev) > severity_weight(&existing.severity) {
@@ -307,7 +346,21 @@ impl SpikeRadar {
             }
             existing.sample_entry = entry.clone();
             existing.is_spike = existing.count >= 3 || existing.severity == "CRITICAL";
+            if !was_spike && existing.is_spike {
+                alert = Some(SpikeAlert::SpikeThresholdCrossed {
+                    severity: existing.severity.clone(),
+                    fingerprint: existing.fingerprint.clone(),
+                    count: existing.count,
+                });
+            }
         } else {
+            let is_high_sev = matches!(sev.as_str(), "ERROR" | "CRITICAL" | "ALERT" | "EMERGENCY");
+            if is_high_sev {
+                alert = Some(SpikeAlert::NewErrorPattern {
+                    severity: sev.clone(),
+                    fingerprint: fp.clone(),
+                });
+            }
             let is_spike = sev == "CRITICAL" || sev == "ALERT" || sev == "EMERGENCY";
             self.clusters.push(ErrorCluster {
                 fingerprint: fp,
@@ -326,6 +379,8 @@ impl SpikeRadar {
                 .cmp(&a.count)
                 .then_with(|| severity_weight(&b.severity).cmp(&severity_weight(&a.severity)))
         });
+
+        alert
     }
 
     /// Render a compact Unicode sparkline (`▁▂▃▄▅▆▇█`) of recent error velocity.
@@ -503,5 +558,53 @@ mod tests {
         let text = report.format_report("v1.2.0 (before)", "v1.3.0 (after)");
         assert!(text.contains("New Error Patterns"));
         assert!(text.contains("NullPointerException"));
+    }
+
+    #[test]
+    fn test_spike_radar_emits_alert_on_new_error_and_spike_threshold() {
+        let mut radar = SpikeRadar::new();
+
+        // 1. First WARNING does NOT emit NewErrorPattern alert, but once it hits 3 occurrences it emits SpikeThresholdCrossed
+        let warn1 = radar.record_entry(&LogEntry {
+            severity: Some("WARNING".to_string()),
+            text_payload: Some("Slow query 120ms".to_string()),
+            ..Default::default()
+        });
+        assert!(warn1.is_none());
+
+        let warn2 = radar.record_entry(&LogEntry {
+            severity: Some("WARNING".to_string()),
+            text_payload: Some("Slow query 140ms".to_string()),
+            ..Default::default()
+        });
+        assert!(warn2.is_none());
+
+        let warn3 = radar.record_entry(&LogEntry {
+            severity: Some("WARNING".to_string()),
+            text_payload: Some("Slow query 180ms".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            warn3,
+            Some(SpikeAlert::SpikeThresholdCrossed {
+                severity: "WARNING".to_string(),
+                fingerprint: "Slow query <N>ms".to_string(),
+                count: 3,
+            })
+        );
+
+        // 2. First ERROR immediately emits NewErrorPattern alert
+        let err1 = radar.record_entry(&LogEntry {
+            severity: Some("ERROR".to_string()),
+            text_payload: Some("Connection refused to 10.0.0.5:5432".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(
+            err1,
+            Some(SpikeAlert::NewErrorPattern {
+                severity: "ERROR".to_string(),
+                fingerprint: "Connection refused to <IP>".to_string(),
+            })
+        );
     }
 }
